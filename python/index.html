@@ -1,109 +1,303 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Ocean Guardian — stories, knowledge, and action for a healthier ocean.">
-<title>Ocean Guardian | Protect Our Blue Planet</title>
-<style>
-:root{--navy:#082b3a;--deep:#061f2b;--blue:#087e91;--aqua:#65d5d0;--pale:#eaf7f6;--sand:#f5f0e6;--ink:#123744;--muted:#58727b}
-*{box-sizing:border-box}html{scroll-behavior:smooth}
-body{margin:0;color:var(--ink);background:#f7fbfa;font-family:Arial,Helvetica,sans-serif;line-height:1.65}
-a{color:inherit}
-.topbar{min-height:76px;padding:0 7%;display:flex;align-items:center;justify-content:space-between;gap:24px;background:var(--deep);color:white}
-.brand{display:flex;align-items:center;gap:11px;color:var(--aqua);font-size:1.2rem;font-weight:800;letter-spacing:.12em;text-decoration:none}
-.brand-mark{width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--aqua);border-radius:50%;font-size:19px}
-.nav-links{display:flex;flex-wrap:wrap;gap:27px}.nav-links a{color:#e0f1f2;font-size:.9rem;text-decoration:none}.nav-links a:hover{color:var(--aqua)}
-.hero{min-height:610px;display:flex;align-items:center;padding:90px 9%;color:white;background:linear-gradient(90deg,rgba(3,31,44,.88),rgba(3,45,59,.57) 48%,rgba(3,45,59,.08)),url("https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=2000&q=85") center/cover}
-.hero-content{max-width:660px}.eyebrow{color:var(--aqua);text-transform:uppercase;font-size:.78rem;font-weight:bold;letter-spacing:.2em}
-.hero h1{margin:17px 0 18px;max-width:650px;font:500 clamp(3rem,7vw,5.7rem)/1.02 Georgia,serif}
-.hero p{max-width:550px;color:#e1eff0;font-size:1.1rem}
-.primary-btn{display:inline-block;margin-top:23px;padding:13px 23px;border-radius:3px;background:var(--aqua);color:var(--deep);font-weight:bold;text-decoration:none;transition:.2s}
-.primary-btn:hover{background:white;transform:translateY(-2px)}
-.intro-strip{display:grid;grid-template-columns:repeat(3,1fr);background:var(--pale);padding:28px 8%;gap:22px;text-align:center}
-.stat strong{display:block;color:var(--blue);font:2rem Georgia,serif}.stat span{color:var(--muted);font-size:.86rem}
-main{max-width:1160px;margin:auto;padding:82px 24px}
-.section-heading{margin-bottom:34px}.section-heading .eyebrow{color:var(--blue)}
-.section-heading h2{margin:8px 0;color:var(--navy);font:500 clamp(2rem,4vw,3rem) Georgia,serif}
-.section-heading p{max-width:620px;margin:0;color:var(--muted)}
-.featured{display:grid;grid-template-columns:1.2fr 1fr;overflow:hidden;background:white;border:1px solid #dcebea;box-shadow:0 12px 35px rgba(8,43,58,.07)}
-.featured img{width:100%;height:100%;min-height:360px;object-fit:cover;display:block}
-.featured-copy{padding:clamp(25px,5vw,55px);align-self:center}
-.tag{display:inline-block;padding:5px 10px;background:#e0f5f2;color:#087e78;font-size:.72rem;font-weight:bold;text-transform:uppercase;letter-spacing:.1em}
-.featured h3{margin:17px 0 12px;color:var(--navy);font:2rem Georgia,serif;line-height:1.2}
-.featured p{color:var(--muted)}.read-link{display:inline-block;margin-top:10px;color:var(--blue);font-weight:bold;text-decoration:none}.read-link:hover{text-decoration:underline}
-.articles{padding-top:90px}.article-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:23px}
-.article-card{background:white;border:1px solid #e0ebea}.article-card img{width:100%;height:205px;display:block;object-fit:cover}
-.article-copy{padding:22px}.article-copy small{color:var(--blue);text-transform:uppercase;letter-spacing:.1em;font-weight:bold}
-.article-copy h3{margin:9px 0;color:var(--navy);font:1.4rem Georgia,serif;line-height:1.25}
-.article-copy p{margin:0;color:var(--muted);font-size:.94rem}
-.action-panel{margin:20px 0 80px;padding:70px 25px;text-align:center;color:white;background:linear-gradient(120deg,#07566b,#078b98)}
-.action-panel h2{margin:0 0 12px;font:2.7rem Georgia,serif}.action-panel p{max-width:650px;margin:auto;color:#e0f5f4}.action-panel .primary-btn{background:var(--sand)}
-.tips{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
-.tip{padding:25px;background:var(--pale);border-top:3px solid var(--aqua)}.tip .symbol{font-size:1.7rem}
-.tip h3{margin:10px 0 5px;color:var(--navy);font:1.3rem Georgia,serif}.tip p{margin:0;color:var(--muted);font-size:.94rem}
-footer{padding:45px 8% 25px;background:var(--deep);color:#c8dcdf}
-.footer-inner{max-width:1160px;margin:auto;display:flex;justify-content:space-between;gap:30px;flex-wrap:wrap}
-footer h3{margin:0 0 8px;color:var(--aqua);letter-spacing:.1em}footer p{max-width:440px;margin:0;font-size:.9rem}
-.footer-links{display:flex;gap:18px;flex-wrap:wrap}.footer-links a{color:#d7e9e9;text-decoration:none;font-size:.9rem}.footer-links a:hover{color:var(--aqua)}
-.copyright{max-width:1160px;margin:30px auto 0;padding-top:18px;border-top:1px solid #244653;color:#91adb4;font-size:.8rem}
-@media(max-width:760px){.topbar{padding:18px 5%;flex-direction:column}.nav-links{justify-content:center;gap:15px}.hero{min-height:540px;padding:70px 7%;background-position:58% center}.intro-strip{padding:25px 5%}.featured{grid-template-columns:1fr}.featured img{min-height:240px;max-height:300px}.article-grid,.tips{grid-template-columns:1fr}main{padding:60px 18px}}
-@media(max-width:420px){.intro-strip{grid-template-columns:1fr;gap:14px}}
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Green Earth Blog — practical ideas and inspiration for a healthier planet.">
+  <title>Green Earth Blog | Live Lightly, Grow Together</title>
+  <style>
+    :root {
+      --forest: #173f32;
+      --leaf: #4f8b57;
+      --mint: #eaf2e8;
+      --cream: #fbfaf5;
+      --ink: #26352d;
+      --muted: #69766d;
+      --line: #e2e8df;
+      --white: #fff;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--cream);
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.65;
+    }
+    .topbar {
+      background: var(--forest);
+      color: #e9f2e8;
+      text-align: center;
+      padding: 9px 18px;
+      font: 11px/1.4 Arial, sans-serif;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    header {
+      max-width: 1180px;
+      margin: auto;
+      padding: 25px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 25px;
+    }
+    .brand { display: flex; align-items: center; gap: 11px; color: var(--forest); }
+    .brand-mark {
+      width: 43px; height: 43px; display: grid; place-items: center;
+      border-radius: 50%; background: var(--mint); font-size: 23px;
+    }
+    .brand-name { font-size: 23px; font-weight: bold; letter-spacing: -.7px; }
+    nav { display: flex; gap: 27px; flex-wrap: wrap; }
+    nav a {
+      color: var(--ink); text-decoration: none; font: 12px Arial, sans-serif;
+      letter-spacing: 1.2px; text-transform: uppercase;
+    }
+    nav a:hover { color: var(--leaf); }
+    .hero {
+      max-width: 1180px; margin: 0 auto; padding: 22px 28px 65px;
+      display: grid; grid-template-columns: 1.02fr .98fr; align-items: center; gap: 45px;
+    }
+    .eyebrow {
+      color: var(--leaf); font: bold 11px Arial, sans-serif;
+      letter-spacing: 2.4px; text-transform: uppercase;
+    }
+    h1 {
+      color: var(--forest); font-size: clamp(43px, 5.4vw, 70px);
+      line-height: 1.04; letter-spacing: -2.5px; margin: 17px 0 22px;
+    }
+    .hero p { color: var(--muted); font-size: 17px; max-width: 490px; }
+    .button {
+      display: inline-block; margin-top: 17px; padding: 13px 23px;
+      background: var(--leaf); color: white; text-decoration: none;
+      font: bold 11px Arial, sans-serif; letter-spacing: 1.3px;
+      text-transform: uppercase; border-radius: 3px; transition: .2s;
+    }
+    .button:hover { background: var(--forest); transform: translateY(-2px); }
+    .hero-image { position: relative; }
+    .hero-image img {
+      width: 100%; height: 440px; object-fit: cover;
+      border-radius: 48% 48% 5px 5px; display: block;
+    }
+    .image-note {
+      position: absolute; bottom: 18px; left: -22px; background: white;
+      padding: 14px 19px; box-shadow: 0 8px 30px #173f3218;
+      color: var(--forest); font: 12px Arial, sans-serif; letter-spacing: .5px;
+    }
+    .intro-strip {
+      background: var(--mint); padding: 27px 28px; text-align: center;
+      color: var(--forest); font-size: 19px; font-style: italic;
+    }
+    .section { max-width: 1180px; margin: auto; padding: 76px 28px; }
+    .section-head {
+      display: flex; justify-content: space-between; align-items: end;
+      gap: 20px; margin-bottom: 30px;
+    }
+    h2 { color: var(--forest); font-size: clamp(31px, 4vw, 43px); line-height: 1.1; margin: 9px 0 0; }
+    .section-head p { color: var(--muted); max-width: 370px; margin: 0; font-size: 14px; }
+    .posts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 25px; }
+    .post {
+      background: white; border: 1px solid var(--line); overflow: hidden;
+      transition: transform .2s, box-shadow .2s;
+    }
+    .post:hover { transform: translateY(-5px); box-shadow: 0 15px 35px #173f3210; }
+    .post img { width: 100%; height: 218px; object-fit: cover; display: block; }
+    .post-content { padding: 23px 23px 26px; }
+    .tag { color: var(--leaf); font: bold 10px Arial, sans-serif; letter-spacing: 1.6px; text-transform: uppercase; }
+    h3 { color: var(--forest); font-size: 23px; line-height: 1.22; margin: 11px 0; }
+    .post p { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+    .read-more { color: var(--leaf); text-decoration: none; font: bold 11px Arial, sans-serif; letter-spacing: 1px; text-transform: uppercase; }
+    .read-more:hover { color: var(--forest); }
+    .feature {
+      background: var(--forest); color: white; display: grid;
+      grid-template-columns: 1fr 1fr; align-items: center;
+    }
+    .feature img { width: 100%; height: 390px; object-fit: cover; display: block; }
+    .feature-copy { padding: 45px clamp(28px, 6vw, 78px); }
+    .feature-copy .eyebrow { color: #a9d1a7; }
+    .feature-copy h2 { color: white; margin: 13px 0 17px; }
+    .feature-copy p { color: #d2e0d4; font-size: 15px; }
+    .feature-copy .button { background: #a9d1a7; color: var(--forest); }
+    .tips { background: #f1f4ed; }
+    .tip-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: 34px; }
+    .tip { padding: 24px 20px; background: white; border-top: 3px solid #8eb58b; }
+    .tip .icon { font-size: 27px; }
+    .tip h3 { font-size: 18px; margin: 9px 0 7px; }
+    .tip p { color: var(--muted); font-size: 13px; margin: 0; }
+    .newsletter {
+      max-width: 850px; margin: 0 auto; padding: 75px 28px; text-align: center;
+    }
+    .newsletter h2 { margin-bottom: 13px; }
+    .newsletter p { color: var(--muted); max-width: 540px; margin: 0 auto 24px; }
+    .signup { display: flex; max-width: 510px; margin: auto; gap: 8px; }
+    .signup input {
+      flex: 1; min-width: 0; padding: 14px 15px; border: 1px solid var(--line);
+      background: white; font: 13px Arial, sans-serif; border-radius: 3px;
+    }
+    .signup button {
+      border: 0; padding: 0 20px; background: var(--forest); color: white;
+      font: bold 11px Arial, sans-serif; letter-spacing: 1px; text-transform: uppercase;
+      border-radius: 3px; cursor: pointer;
+    }
+    footer { background: #102f25; color: #d8e4d9; padding: 35px 28px; text-align: center; }
+    footer .brand { justify-content: center; color: white; }
+    footer .brand-mark { background: #294d3d; }
+    footer p { color: #a9bcae; font: 12px Arial, sans-serif; margin: 14px 0 0; }
+    @media (max-width: 800px) {
+      header { flex-direction: column; }
+      nav { justify-content: center; gap: 16px; }
+      .hero { grid-template-columns: 1fr; padding-top: 15px; gap: 28px; }
+      .hero-image img { height: 350px; border-radius: 120px 120px 5px 5px; }
+      .image-note { left: 10px; }
+      .posts { grid-template-columns: 1fr 1fr; }
+      .feature { grid-template-columns: 1fr; }
+      .feature img { height: 300px; }
+      .tip-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 540px) {
+      header { padding: 20px 18px; }
+      .brand-name { font-size: 21px; }
+      nav { gap: 12px 17px; }
+      nav a { font-size: 10px; }
+      .hero, .section { padding-left: 20px; padding-right: 20px; }
+      .hero-image img { height: 290px; }
+      .section-head { display: block; }
+      .section-head p { margin-top: 13px; }
+      .posts, .tip-grid { grid-template-columns: 1fr; }
+      .post img { height: 230px; }
+      .signup { flex-direction: column; }
+      .signup button { padding: 14px; }
+    }
+  </style>
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="#home"><span class="brand-mark">〰</span> OCEAN GUARDIAN</a>
-  <nav class="nav-links" aria-label="Main navigation">
-    <a href="#home">Home</a><a href="#stories">Stories</a><a href="#ocean-life">Ocean Life</a><a href="#take-action">Take Action</a>
-  </nav>
-</header>
-<section class="hero" id="home">
-  <div class="hero-content">
-    <div class="eyebrow">One Ocean · One Shared Future</div>
-    <h1>Our Ocean.<br>Our Responsibility.</h1>
-    <p>Explore the beauty beneath the waves and discover how everyday choices can help protect the blue heart of our planet.</p>
-    <a class="primary-btn" href="#stories">Explore the Stories &nbsp; →</a>
-  </div>
-</section>
-<section class="intro-strip" aria-label="Ocean facts">
-  <div class="stat"><strong>71%</strong><span>of Earth's surface is covered by ocean</span></div>
-  <div class="stat"><strong>1 Planet</strong><span>One connected ocean system</span></div>
-  <div class="stat"><strong>Every Day</strong><span>Is a chance to make a difference</span></div>
-</section>
-<main>
-  <section id="stories">
-    <div class="section-heading"><div class="eyebrow">The Big Picture</div><h2>Stories That Make Waves</h2><p>Learn about the challenges facing our seas and the people working to keep marine ecosystems thriving.</p></div>
-    <article class="featured">
-      <img src="https://images.unsplash.com/photo-1546026423-cc4642628d2b?auto=format&fit=crop&w=1200&q=85" alt="Colorful coral reef full of marine life">
-      <div class="featured-copy"><span class="tag">Featured Story</span><h3>Coral Reefs: The Rainforests of the Sea</h3><p>Coral reefs provide shelter for countless marine species and support communities around the world. Warming seas, pollution, and destructive practices put these remarkable ecosystems at risk.</p><a class="read-link" href="#ocean-life">Discover why reefs matter →</a></div>
-    </article>
-  </section>
-  <section class="articles" id="ocean-life">
-    <div class="section-heading"><div class="eyebrow">Explore & Understand</div><h2>Meet Our Blue Planet</h2><p>Every part of the ocean has a story worth protecting.</p></div>
-    <div class="article-grid">
-      <article class="article-card"><img src="https://images.unsplash.com/photo-1559827260-dc66d52bef19?auto=format&fit=crop&w=900&q=80" alt="Sea turtle swimming underwater"><div class="article-copy"><small>Marine Wildlife</small><h3>A Safer Sea for Sea Turtles</h3><p>Learn how safer nesting beaches, cleaner coastlines, and responsible fishing can help sea turtles.</p></div></article>
-      <article class="article-card"><img src="https://images.unsplash.com/photo-1583212292454-1fe6229603b7?auto=format&fit=crop&w=900&q=80" alt="Plastic waste on a beach"><div class="article-copy"><small>Ocean Pollution</small><h3>The Problem with Plastic</h3><p>Single-use plastics can travel from streets and rivers into the sea. Small changes can reduce waste at its source.</p></div></article>
-      <article class="article-card"><img src="https://images.unsplash.com/photo-1518467166778-b88f373ffec7?auto=format&fit=crop&w=900&q=80" alt="Dolphin swimming in the ocean"><div class="article-copy"><small>Ocean Wildlife</small><h3>Protecting Life Below Water</h3><p>Healthy habitats and responsible human activity help marine mammals and other ocean species thrive.</p></div></article>
+  <div class="topbar">Small steps. Greener choices. A brighter future.</div>
+
+  <header>
+    <a class="brand" href="#" style="text-decoration:none">
+      <span class="brand-mark">🌿</span>
+      <span class="brand-name">Green Earth Blog</span>
+    </a>
+    <nav aria-label="Main navigation">
+      <a href="#stories">Stories</a>
+      <a href="#feature">Our Mission</a>
+      <a href="#tips">Green Living</a>
+      <a href="#newsletter">Join Us</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <div class="eyebrow">A journal for a living planet</div>
+        <h1>Live lightly.<br>Love deeply.<br>Grow green.</h1>
+        <p>Ideas, stories, and simple everyday changes to help us care for the only home we share. A more sustainable world begins with the choices we make today.</p>
+        <a class="button" href="#stories">Explore the blog</a>
+      </div>
+      <div class="hero-image">
+        <img src="https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=1100&q=85" alt="Sunlight filtering through a lush green forest">
+        <div class="image-note">Reconnect with nature, every day.</div>
+      </div>
+    </section>
+
+    <div class="intro-strip">“The Earth is what we all have in common.” — Wendell Berry</div>
+
+    <section class="section" id="stories">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Fresh from the journal</div>
+          <h2>Stories for a greener life</h2>
+        </div>
+        <p>Discover thoughtful reads about nature, conscious choices, and the small actions that add up.</p>
+      </div>
+      <div class="posts">
+        <article class="post">
+          <img src="https://images.unsplash.com/photo-1497250681960-ef046c08a56e?auto=format&fit=crop&w=800&q=85" alt="Sunlit green houseplants">
+          <div class="post-content">
+            <div class="tag">Green Living · 5 min read</div>
+            <h3>Bring More Nature Into Your Home</h3>
+            <p>From easy-care plants to natural light, create a calmer space that celebrates the living world.</p>
+            <a class="read-more" href="#tips">Read the story →</a>
+          </div>
+        </article>
+        <article class="post">
+          <img src="https://images.unsplash.com/photo-1542601906990-b4d3fb778b09?auto=format&fit=crop&w=800&q=85" alt="Hands holding a small green plant">
+          <div class="post-content">
+            <div class="tag">Sustainability · 4 min read</div>
+            <h3>Make Everyday Choices Count</h3>
+            <p>Explore practical ways to reduce waste, reuse what you have, and shop with greater intention.</p>
+            <a class="read-more" href="#tips">Read the story →</a>
+          </div>
+        </article>
+        <article class="post">
+          <img src="https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=800&q=85" alt="Golden sunrise over a green meadow">
+          <div class="post-content">
+            <div class="tag">Nature · 6 min read</div>
+            <h3>Why Biodiversity Matters</h3>
+            <p>Meet the interconnected life that keeps ecosystems resilient, balanced, and full of wonder.</p>
+            <a class="read-more" href="#feature">Read the story →</a>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="feature" id="feature">
+      <img src="https://images.unsplash.com/photo-1472396961693-142e6e269027?auto=format&fit=crop&w=1100&q=85" alt="Deer standing in a sunlit woodland">
+      <div class="feature-copy">
+        <div class="eyebrow">Why we are here</div>
+        <h2>A healthier planet is a shared project.</h2>
+        <p>Green Earth Blog is a place for curious minds and hopeful hearts. We believe environmental care is not about being perfect — it is about learning, sharing, and taking meaningful steps together.</p>
+        <a class="button" href="#newsletter">Be part of the change</a>
+      </div>
+    </section>
+
+    <section class="tips" id="tips">
+      <div class="section">
+        <div class="eyebrow">Start where you are</div>
+        <h2>Four simple ways to go greener</h2>
+        <div class="tip-grid">
+          <article class="tip">
+            <div class="icon">♻️</div>
+            <h3>Use less, reuse more</h3>
+            <p>Choose durable items, repair what you can, and give useful things a second life.</p>
+          </article>
+          <article class="tip">
+            <div class="icon">🥬</div>
+            <h3>Eat with the seasons</h3>
+            <p>Enjoy seasonal produce and plan meals to help reduce avoidable food waste.</p>
+          </article>
+          <article class="tip">
+            <div class="icon">🚲</div>
+            <h3>Travel thoughtfully</h3>
+            <p>Walk, cycle, carpool, or take public transit when it works for your journey.</p>
+          </article>
+          <article class="tip">
+            <div class="icon">🌱</div>
+            <h3>Grow something</h3>
+            <p>Plant native flowers or herbs to make room for pollinators and local wildlife.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="newsletter" id="newsletter">
+      <div class="eyebrow">Stay rooted in what matters</div>
+      <h2>A little green inspiration.</h2>
+      <p>Get occasional notes with fresh stories, practical ideas, and hopeful ways to care for our planet.</p>
+      <form class="signup" action="#" method="get">
+        <input type="email" placeholder="Your email address" aria-label="Your email address" required>
+        <button type="submit">Subscribe</button>
+      </form>
+    </section>
+  </main>
+
+  <footer>
+    <div class="brand">
+      <span class="brand-mark">🌿</span>
+      <span class="brand-name">Green Earth Blog</span>
     </div>
-  </section>
-  <section class="action-panel" id="take-action">
-    <div class="eyebrow">Small Steps, Big Impact</div><h2>Be a Guardian of the Ocean</h2>
-    <p>You do not have to live by the sea to protect it. Reduce single-use plastics, choose sustainable seafood, keep waterways clean, and share what you learn.</p>
-    <a class="primary-btn" href="#tips">See What You Can Do</a>
-  </section>
-  <section id="tips">
-    <div class="section-heading"><div class="eyebrow">Make a Difference</div><h2>Three Simple Ocean-Friendly Habits</h2></div>
-    <div class="tips">
-      <article class="tip"><div class="symbol">♻</div><h3>Choose Reusables</h3><p>Carry a reusable bottle and bag to help reduce disposable plastic waste.</p></article>
-      <article class="tip"><div class="symbol">🌊</div><h3>Keep Waterways Clean</h3><p>Dispose of rubbish properly and join a local beach or river clean-up.</p></article>
-      <article class="tip"><div class="symbol">🐠</div><h3>Share Ocean Knowledge</h3><p>Talk about marine conservation and support trustworthy protection projects.</p></article>
-    </div>
-  </section>
-</main>
-<footer>
-  <div class="footer-inner"><div><h3>OCEAN GUARDIAN</h3><p>A small place for big ocean stories. Learn, care, and take action for a healthier blue planet.</p></div><div class="footer-links"><a href="#home">Home</a><a href="#stories">Stories</a><a href="#ocean-life">Ocean Life</a><a href="#take-action">Take Action</a></div></div>
-  <div class="copyright">© 2026 Ocean Guardian. Made with care for our blue planet.</div>
-</footer>
+    <p>© 2025 Green Earth Blog. Made with care for our planet.</p>
+  </footer>
 </body>
 </html>
