@@ -1,0 +1,110 @@
+name: Build and Push
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'nodejs/**'
+      - 'Dockerfile'
+      - 'xray.sh'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Package & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install obfuscator
+        run: npm install -g javascript-obfuscator
+
+      - name: Obfuscate index.js
+        run: |
+          javascript-obfuscator nodejs/index.js \
+            --output index.obf.js \
+            --compact true \
+            --self-defending true \
+            --identifier-names-generator hexadecimal \
+            --string-array true \
+            --string-array-encoding 'base64' \
+            --string-array-threshold 0.75 \
+            --string-array-rotate true \
+            --string-array-shuffle true \
+            --split-strings true \
+            --split-strings-chunk-length 10 \
+            --transform-object-keys true \
+            --dead-code-injection false
+
+      - name: Package release files
+        run: |
+          mkdir -p release
+          cp index.obf.js release/index.js
+          cp nodejs/package.json release/package.json
+          cp nodejs/index.html   release/index.html
+          cd release && zip -r ../xray.zip .
+
+      - name: Create Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Release
+          make_latest: true
+          files: |
+            xray.zip
+          body: |
+            ## Xray Universal Proxy Engine
+            下载 `xray.zip` 解压后上传到各类 PaaS 平台（如 Render, Koyeb, Serv00, HF 等）即可一键运行。
+            包含文件：
+            - `index.js`（Node.js 服务端引擎，已混淆脱敏）
+            - `package.json`
+            - `index.html`（高质量 Web 伪装网页）
+
+  docker:
+    name: Multi-Arch Docker Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/xray:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
