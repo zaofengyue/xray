@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Ocean Guardian — stories, knowledge, and action for a healthier ocean.">
+<title>Ocean Guardian | Protect Our Blue Planet</title>
+<style>
+:root{--navy:#082b3a;--deep:#061f2b;--blue:#087e91;--aqua:#65d5d0;--pale:#eaf7f6;--sand:#f5f0e6;--ink:#123744;--muted:#58727b}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;color:var(--ink);background:#f7fbfa;font-family:Arial,Helvetica,sans-serif;line-height:1.65}
+a{color:inherit}
+.topbar{min-height:76px;padding:0 7%;display:flex;align-items:center;justify-content:space-between;gap:24px;background:var(--deep);color:white}
+.brand{display:flex;align-items:center;gap:11px;color:var(--aqua);font-size:1.2rem;font-weight:800;letter-spacing:.12em;text-decoration:none}
+.brand-mark{width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--aqua);border-radius:50%;font-size:19px}
+.nav-links{display:flex;flex-wrap:wrap;gap:27px}.nav-links a{color:#e0f1f2;font-size:.9rem;text-decoration:none}.nav-links a:hover{color:var(--aqua)}
+.hero{min-height:610px;display:flex;align-items:center;padding:90px 9%;color:white;background:linear-gradient(90deg,rgba(3,31,44,.88),rgba(3,45,59,.57) 48%,rgba(3,45,59,.08)),url("https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=2000&q=85") center/cover}
+.hero-content{max-width:660px}.eyebrow{color:var(--aqua);text-transform:uppercase;font-size:.78rem;font-weight:bold;letter-spacing:.2em}
+.hero h1{margin:17px 0 18px;max-width:650px;font:500 clamp(3rem,7vw,5.7rem)/1.02 Georgia,serif}
+.hero p{max-width:550px;color:#e1eff0;font-size:1.1rem}
+.primary-btn{display:inline-block;margin-top:23px;padding:13px 23px;border-radius:3px;background:var(--aqua);color:var(--deep);font-weight:bold;text-decoration:none;transition:.2s}
+.primary-btn:hover{background:white;transform:translateY(-2px)}
+.intro-strip{display:grid;grid-template-columns:repeat(3,1fr);background:var(--pale);padding:28px 8%;gap:22px;text-align:center}
+.stat strong{display:block;color:var(--blue);font:2rem Georgia,serif}.stat span{color:var(--muted);font-size:.86rem}
+main{max-width:1160px;margin:auto;padding:82px 24px}
+.section-heading{margin-bottom:34px}.section-heading .eyebrow{color:var(--blue)}
+.section-heading h2{margin:8px 0;color:var(--navy);font:500 clamp(2rem,4vw,3rem) Georgia,serif}
+.section-heading p{max-width:620px;margin:0;color:var(--muted)}
+.featured{display:grid;grid-template-columns:1.2fr 1fr;overflow:hidden;background:white;border:1px solid #dcebea;box-shadow:0 12px 35px rgba(8,43,58,.07)}
+.featured img{width:100%;height:100%;min-height:360px;object-fit:cover;display:block}
+.featured-copy{padding:clamp(25px,5vw,55px);align-self:center}
+.tag{display:inline-block;padding:5px 10px;background:#e0f5f2;color:#087e78;font-size:.72rem;font-weight:bold;text-transform:uppercase;letter-spacing:.1em}
+.featured h3{margin:17px 0 12px;color:var(--navy);font:2rem Georgia,serif;line-height:1.2}
+.featured p{color:var(--muted)}.read-link{display:inline-block;margin-top:10px;color:var(--blue);font-weight:bold;text-decoration:none}.read-link:hover{text-decoration:underline}
+.articles{padding-top:90px}.article-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:23px}
+.article-card{background:white;border:1px solid #e0ebea}.article-card img{width:100%;height:205px;display:block;object-fit:cover}
+.article-copy{padding:22px}.article-copy small{color:var(--blue);text-transform:uppercase;letter-spacing:.1em;font-weight:bold}
+.article-copy h3{margin:9px 0;color:var(--navy);font:1.4rem Georgia,serif;line-height:1.25}
+.article-copy p{margin:0;color:var(--muted);font-size:.94rem}
+.action-panel{margin:20px 0 80px;padding:70px 25px;text-align:center;color:white;background:linear-gradient(120deg,#07566b,#078b98)}
+.action-panel h2{margin:0 0 12px;font:2.7rem Georgia,serif}.action-panel p{max-width:650px;margin:auto;color:#e0f5f4}.action-panel .primary-btn{background:var(--sand)}
+.tips{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.tip{padding:25px;background:var(--pale);border-top:3px solid var(--aqua)}.tip .symbol{font-size:1.7rem}
+.tip h3{margin:10px 0 5px;color:var(--navy);font:1.3rem Georgia,serif}.tip p{margin:0;color:var(--muted);font-size:.94rem}
+footer{padding:45px 8% 25px;background:var(--deep);color:#c8dcdf}
+.footer-inner{max-width:1160px;margin:auto;display:flex;justify-content:space-between;gap:30px;flex-wrap:wrap}
+footer h3{margin:0 0 8px;color:var(--aqua);letter-spacing:.1em}footer p{max-width:440px;margin:0;font-size:.9rem}
+.footer-links{display:flex;gap:18px;flex-wrap:wrap}.footer-links a{color:#d7e9e9;text-decoration:none;font-size:.9rem}.footer-links a:hover{color:var(--aqua)}
+.copyright{max-width:1160px;margin:30px auto 0;padding-top:18px;border-top:1px solid #244653;color:#91adb4;font-size:.8rem}
+@media(max-width:760px){.topbar{padding:18px 5%;flex-direction:column}.nav-links{justify-content:center;gap:15px}.hero{min-height:540px;padding:70px 7%;background-position:58% center}.intro-strip{padding:25px 5%}.featured{grid-template-columns:1fr}.featured img{min-height:240px;max-height:300px}.article-grid,.tips{grid-template-columns:1fr}main{padding:60px 18px}}
+@media(max-width:420px){.intro-strip{grid-template-columns:1fr;gap:14px}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#home"><span class="brand-mark">〰</span> OCEAN GUARDIAN</a>
+  <nav class="nav-links" aria-label="Main navigation">
+    <a href="#home">Home</a><a href="#stories">Stories</a><a href="#ocean-life">Ocean Life</a><a href="#take-action">Take Action</a>
+  </nav>
+</header>
+<section class="hero" id="home">
+  <div class="hero-content">
+    <div class="eyebrow">One Ocean · One Shared Future</div>
+    <h1>Our Ocean.<br>Our Responsibility.</h1>
+    <p>Explore the beauty beneath the waves and discover how everyday choices can help protect the blue heart of our planet.</p>
+    <a class="primary-btn" href="#stories">Explore the Stories &nbsp; →</a>
+  </div>
+</section>
+<section class="intro-strip" aria-label="Ocean facts">
+  <div class="stat"><strong>71%</strong><span>of Earth's surface is covered by ocean</span></div>
+  <div class="stat"><strong>1 Planet</strong><span>One connected ocean system</span></div>
+  <div class="stat"><strong>Every Day</strong><span>Is a chance to make a difference</span></div>
+</section>
+<main>
+  <section id="stories">
+    <div class="section-heading"><div class="eyebrow">The Big Picture</div><h2>Stories That Make Waves</h2><p>Learn about the challenges facing our seas and the people working to keep marine ecosystems thriving.</p></div>
+    <article class="featured">
+      <img src="https://images.unsplash.com/photo-1546026423-cc4642628d2b?auto=format&fit=crop&w=1200&q=85" alt="Colorful coral reef full of marine life">
+      <div class="featured-copy"><span class="tag">Featured Story</span><h3>Coral Reefs: The Rainforests of the Sea</h3><p>Coral reefs provide shelter for countless marine species and support communities around the world. Warming seas, pollution, and destructive practices put these remarkable ecosystems at risk.</p><a class="read-link" href="#ocean-life">Discover why reefs matter →</a></div>
+    </article>
+  </section>
+  <section class="articles" id="ocean-life">
+    <div class="section-heading"><div class="eyebrow">Explore & Understand</div><h2>Meet Our Blue Planet</h2><p>Every part of the ocean has a story worth protecting.</p></div>
+    <div class="article-grid">
+      <article class="article-card"><img src="https://images.unsplash.com/photo-1559827260-dc66d52bef19?auto=format&fit=crop&w=900&q=80" alt="Sea turtle swimming underwater"><div class="article-copy"><small>Marine Wildlife</small><h3>A Safer Sea for Sea Turtles</h3><p>Learn how safer nesting beaches, cleaner coastlines, and responsible fishing can help sea turtles.</p></div></article>
+      <article class="article-card"><img src="https://images.unsplash.com/photo-1583212292454-1fe6229603b7?auto=format&fit=crop&w=900&q=80" alt="Plastic waste on a beach"><div class="article-copy"><small>Ocean Pollution</small><h3>The Problem with Plastic</h3><p>Single-use plastics can travel from streets and rivers into the sea. Small changes can reduce waste at its source.</p></div></article>
+      <article class="article-card"><img src="https://images.unsplash.com/photo-1518467166778-b88f373ffec7?auto=format&fit=crop&w=900&q=80" alt="Dolphin swimming in the ocean"><div class="article-copy"><small>Ocean Wildlife</small><h3>Protecting Life Below Water</h3><p>Healthy habitats and responsible human activity help marine mammals and other ocean species thrive.</p></div></article>
+    </div>
+  </section>
+  <section class="action-panel" id="take-action">
+    <div class="eyebrow">Small Steps, Big Impact</div><h2>Be a Guardian of the Ocean</h2>
+    <p>You do not have to live by the sea to protect it. Reduce single-use plastics, choose sustainable seafood, keep waterways clean, and share what you learn.</p>
+    <a class="primary-btn" href="#tips">See What You Can Do</a>
+  </section>
+  <section id="tips">
+    <div class="section-heading"><div class="eyebrow">Make a Difference</div><h2>Three Simple Ocean-Friendly Habits</h2></div>
+    <div class="tips">
+      <article class="tip"><div class="symbol">♻</div><h3>Choose Reusables</h3><p>Carry a reusable bottle and bag to help reduce disposable plastic waste.</p></article>
+      <article class="tip"><div class="symbol">🌊</div><h3>Keep Waterways Clean</h3><p>Dispose of rubbish properly and join a local beach or river clean-up.</p></article>
+      <article class="tip"><div class="symbol">🐠</div><h3>Share Ocean Knowledge</h3><p>Talk about marine conservation and support trustworthy protection projects.</p></article>
+    </div>
+  </section>
+</main>
+<footer>
+  <div class="footer-inner"><div><h3>OCEAN GUARDIAN</h3><p>A small place for big ocean stories. Learn, care, and take action for a healthier blue planet.</p></div><div class="footer-links"><a href="#home">Home</a><a href="#stories">Stories</a><a href="#ocean-life">Ocean Life</a><a href="#take-action">Take Action</a></div></div>
+  <div class="copyright">© 2026 Ocean Guardian. Made with care for our blue planet.</div>
+</footer>
+</body>
+</html>

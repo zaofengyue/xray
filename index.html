@@ -1,1117 +1,620 @@
-
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-<title>Lighthouse Keeper — A Journal by the Sea</title>
-
+<title>Xray 部署面板 · One-line Install</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-
-/* =====================================================
-   LIGHTHOUSE KEEPER
-   Cinematic Coastal Journal
-   Pure HTML + CSS + JavaScript
-===================================================== */
-
-:root{
-    --night:#050b13;
-    --deep:#0b1825;
-    --ocean:#102b3b;
-    --paper:#e9e1d2;
-    --warm:#e9c78c;
-    --muted:#91a4b2;
-    --line:rgba(220,230,235,.14);
-}
-
-*{
-    margin:0;
-    padding:0;
-    box-sizing:border-box;
-}
-
-html{
-    scroll-behavior:smooth;
-}
-
-body{
-    background:var(--night);
-    color:var(--paper);
-    font-family:Georgia,"Times New Roman",serif;
-    line-height:1.85;
-    overflow-x:hidden;
-}
-
-a{
-    color:inherit;
-    text-decoration:none;
-}
-
-button{
-    font:inherit;
-}
-
-/* =====================================================
-   BACKGROUND
-===================================================== */
-
-.site-background{
-    position:fixed;
-    inset:0;
-    z-index:-10;
-    background:
-        radial-gradient(
-            ellipse at 75% 20%,
-            rgba(55,92,113,.23),
-            transparent 45%
-        ),
-        linear-gradient(
-            180deg,
-            #03070d 0%,
-            #071522 55%,
-            #0b1b28 100%
-        );
-}
-
-.grain{
-    position:fixed;
-    inset:0;
-    pointer-events:none;
-    z-index:20;
-    opacity:.065;
-    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.7'/%3E%3C/svg%3E");
-}
-
-/* Stars */
-
-.stars{
-    position:fixed;
-    inset:0;
-    pointer-events:none;
-    z-index:-5;
-}
-
-.star{
-    position:absolute;
-    width:2px;
-    height:2px;
-    border-radius:50%;
-    background:#dce8ed;
-    opacity:.35;
-    animation:twinkle 5s ease-in-out infinite;
-}
-
-@keyframes twinkle{
-    0%,100%{opacity:.2}
-    50%{opacity:.9}
-}
-
-/* =====================================================
-   NAVIGATION
-===================================================== */
-
-.navbar{
-    position:absolute;
-    top:0;
-    left:0;
-    width:100%;
-    z-index:10;
-    padding:28px 6%;
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    border-bottom:1px solid rgba(255,255,255,.08);
-}
-
-.logo{
-    font-size:1rem;
-    letter-spacing:3px;
-    text-transform:uppercase;
-}
-
-.logo span{
-    color:var(--warm);
-}
-
-.nav-links{
-    display:flex;
-    gap:30px;
-    list-style:none;
-    font-family:Arial,sans-serif;
-    font-size:.72rem;
-    letter-spacing:2px;
-    text-transform:uppercase;
-}
-
-.nav-links a{
-    color:#a7b7c2;
-    transition:color .3s;
-}
-
-.nav-links a:hover{
-    color:var(--warm);
-}
-
-/* =====================================================
-   HERO
-===================================================== */
-
-.hero{
-    min-height:100vh;
-    position:relative;
-    display:flex;
-    align-items:center;
-    overflow:hidden;
-    padding:140px 7% 90px;
-}
-
-/* Moon */
-
-.moon{
-    position:absolute;
-    width:220px;
-    height:220px;
-    border-radius:50%;
-    top:12%;
-    right:15%;
-    background:
-        radial-gradient(
-            circle at 35% 30%,
-            #fffdf0,
-            #e8e5d4 60%,
-            #b4c2c9
-        );
-    box-shadow:
-        0 0 40px rgba(220,235,240,.3),
-        0 0 140px rgba(150,190,215,.12);
-    animation:moonFloat 12s ease-in-out infinite;
-}
-
-@keyframes moonFloat{
-    0%,100%{transform:translateY(0)}
-    50%{transform:translateY(10px)}
-}
-
-/* Sea */
-
-.sea{
-    position:absolute;
-    left:0;
-    right:0;
-    bottom:0;
-    height:37%;
-    background:
-        linear-gradient(
-            to top,
-            #07121d,
-            rgba(9,29,42,.8),
-            transparent
-        );
-    pointer-events:none;
-}
-
-.sea::before{
-    content:"";
-    position:absolute;
-    inset:20% 0 0;
-    opacity:.35;
-    background:
-        repeating-linear-gradient(
-            174deg,
-            transparent 0 18px,
-            rgba(134,173,191,.12) 19px 20px,
-            transparent 21px 38px
-        );
-    animation:waterMove 14s linear infinite;
-}
-
-@keyframes waterMove{
-    from{background-position:0 0}
-    to{background-position:180px 0}
-}
-
-/* Hero content */
-
-.hero-content{
-    position:relative;
-    z-index:2;
-    max-width:850px;
-}
-
-.eyebrow{
-    font-family:Arial,sans-serif;
-    font-size:.72rem;
-    letter-spacing:5px;
-    color:var(--warm);
-    text-transform:uppercase;
-    margin-bottom:25px;
-    opacity:0;
-    animation:fadeUp 1s .2s forwards;
-}
-
-.hero h1{
-    font-size:clamp(3.5rem,8.5vw,8rem);
-    font-weight:400;
-    line-height:1.03;
-    letter-spacing:-2px;
-    margin-bottom:30px;
-    opacity:0;
-    animation:fadeUp 1.2s .4s forwards;
-}
-
-.hero h1 em{
-    font-weight:400;
-    color:var(--warm);
-}
-
-.hero-description{
-    max-width:550px;
-    font-size:1.05rem;
-    color:#aebdc7;
-    line-height:2;
-    margin-bottom:38px;
-    opacity:0;
-    animation:fadeUp 1.2s .65s forwards;
-}
-
-.hero-button{
-    display:inline-flex;
-    align-items:center;
-    gap:16px;
-    padding:14px 24px;
-    border:1px solid rgba(233,199,140,.5);
-    color:var(--warm);
-    font-family:Arial,sans-serif;
-    font-size:.7rem;
-    letter-spacing:2px;
-    text-transform:uppercase;
-    transition:.3s;
-    opacity:0;
-    animation:fadeUp 1.2s .9s forwards;
-}
-
-.hero-button:hover{
-    background:var(--warm);
-    color:#07111a;
-}
-
-.hero-button::after{
-    content:"→";
-    font-size:1.2rem;
-}
-
-@keyframes fadeUp{
-    from{
-        opacity:0;
-        transform:translateY(25px);
-    }
-    to{
-        opacity:1;
-        transform:translateY(0);
-    }
-}
-
-/* Lighthouse silhouette */
-
-.lighthouse{
-    position:absolute;
-    right:12%;
-    bottom:14%;
-    width:100px;
-    height:300px;
-    z-index:1;
-    filter:drop-shadow(0 0 30px rgba(0,0,0,.4));
-}
-
-.lighthouse-tower{
-    position:absolute;
-    bottom:0;
-    left:18px;
-    width:64px;
-    height:230px;
-    background:
-        linear-gradient(
-            90deg,
-            #273744,
-            #60727a 48%,
-            #1b2b36
-        );
-    clip-path:polygon(25% 0,75% 0,100% 100%,0 100%);
-}
-
-.lighthouse-room{
-    position:absolute;
-    bottom:220px;
-    left:8px;
-    width:84px;
-    height:58px;
-    background:#263b47;
-    border:3px solid #71838a;
-    border-radius:8px 8px 3px 3px;
-}
-
-.lighthouse-room::after{
-    content:"";
-    position:absolute;
-    inset:8px;
-    background:#e9c78c;
-    box-shadow:0 0 40px #e9c78c;
-    animation:lampPulse 5s ease-in-out infinite;
-}
-
-.lighthouse-roof{
-    position:absolute;
-    bottom:275px;
-    left:0;
-    width:100px;
-    height:15px;
-    background:#1c2a33;
-    clip-path:polygon(50% 0,100% 100%,0 100%);
-}
-
-.lighthouse-beam{
-    position:absolute;
-    left:-450px;
-    bottom:230px;
-    width:550px;
-    height:100px;
-    background:linear-gradient(
-        90deg,
-        rgba(233,199,140,.18),
-        rgba(233,199,140,0)
-    );
-    clip-path:polygon(100% 0,100% 100%,0 60%,0 40%);
-    transform-origin:right center;
-    animation:beamRotate 14s linear infinite;
-    pointer-events:none;
-}
-
-@keyframes beamRotate{
-    0%{transform:rotate(-18deg)}
-    50%{transform:rotate(18deg)}
-    100%{transform:rotate(-18deg)}
-}
-
-@keyframes lampPulse{
-    0%,100%{opacity:.7}
-    50%{opacity:1}
-}
-
-/* =====================================================
-   COMMON SECTIONS
-===================================================== */
-
-.section{
-    max-width:1150px;
-    margin:auto;
-    padding:120px 7%;
-}
-
-.section-label{
-    font-family:Arial,sans-serif;
-    font-size:.68rem;
-    letter-spacing:4px;
-    color:var(--warm);
-    text-transform:uppercase;
-    margin-bottom:18px;
-}
-
-.section-title{
-    font-size:clamp(2.3rem,4vw,4rem);
-    font-weight:400;
-    line-height:1.2;
-    margin-bottom:25px;
-}
-
-.section-intro{
-    color:var(--muted);
-    max-width:550px;
-    line-height:2;
-}
-
-.divider{
-    width:100%;
-    height:1px;
-    background:var(--line);
-}
-
-/* =====================================================
-   INTRO
-===================================================== */
-
-.intro{
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:80px;
-    align-items:center;
-}
-
-.intro-image{
-    min-height:430px;
-    position:relative;
-    overflow:hidden;
-    background:
-        linear-gradient(
-            135deg,
-            rgba(9,29,43,.3),
-            rgba(0,0,0,.6)
-        ),
-        url("https://images.unsplash.com/photo-1498623116890-37e912163d5d?auto=format&fit=crop&w=1200&q=85");
-    background-size:cover;
-    background-position:center;
-}
-
-.intro-image::after{
-    content:"THE COASTAL ARCHIVE";
-    position:absolute;
-    bottom:22px;
-    left:22px;
-    font-family:Arial,sans-serif;
-    font-size:.65rem;
-    letter-spacing:3px;
-    color:#d8e1e6;
-}
-
-.intro-text p{
-    color:#aab8c2;
-    margin-bottom:22px;
-}
-
-/* =====================================================
-   JOURNAL ENTRIES
-===================================================== */
-
-.journal-header{
-    display:flex;
-    justify-content:space-between;
-    align-items:end;
-    gap:20px;
-    margin-bottom:55px;
-}
-
-.journal-grid{
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:24px;
-}
-
-.journal-card{
-    border:1px solid var(--line);
-    background:rgba(10,24,37,.55);
-    padding:32px;
-    transition:.35s;
-}
-
-.journal-card:hover{
-    transform:translateY(-7px);
-    border-color:rgba(233,199,140,.5);
-}
-
-.card-number{
-    font-family:Arial,sans-serif;
-    font-size:.7rem;
-    letter-spacing:3px;
-    color:var(--warm);
-}
-
-.journal-card h3{
-    font-size:1.55rem;
-    font-weight:400;
-    line-height:1.4;
-    margin:20px 0;
-}
-
-.journal-card p{
-    font-size:.95rem;
-    color:#9eb0bd;
-    line-height:1.9;
-}
-
-.card-date{
-    display:block;
-    margin-top:28px;
-    padding-top:18px;
-    border-top:1px solid var(--line);
-    font-family:Arial,sans-serif;
-    font-size:.65rem;
-    letter-spacing:2px;
-    color:#718795;
-}
-
-/* =====================================================
-   FEATURE LETTER
-===================================================== */
-
-.letter-section{
-    max-width:900px;
-    margin:auto;
-    padding:130px 7%;
-    text-align:center;
-}
-
-.letter{
-    margin-top:45px;
-    padding:60px 50px;
-    background:
-        linear-gradient(
-            145deg,
-            rgba(22,40,54,.9),
-            rgba(8,20,31,.85)
-        );
-    border:1px solid var(--line);
-    position:relative;
-}
-
-.letter::before,
-.letter::after{
-    content:"";
-    position:absolute;
-    width:30px;
-    height:30px;
-    border-color:rgba(233,199,140,.4);
-    border-style:solid;
-}
-
-.letter::before{
-    top:20px;
-    left:20px;
-    border-width:1px 0 0 1px;
-}
-
-.letter::after{
-    right:20px;
-    bottom:20px;
-    border-width:0 1px 1px 0;
-}
-
-.letter-label{
-    font-family:Arial,sans-serif;
-    color:var(--warm);
-    font-size:.65rem;
-    letter-spacing:4px;
-    text-transform:uppercase;
-}
-
-.letter h3{
-    font-size:2.5rem;
-    font-weight:400;
-    margin:25px 0;
-}
-
-.letter p{
-    color:#aebdc7;
-    margin-bottom:22px;
-}
-
-.letter-signature{
-    margin-top:30px;
-    color:var(--warm);
-    font-style:italic;
-}
-
-/* =====================================================
-   FOOTER
-===================================================== */
-
-.footer{
-    padding:80px 7%;
-    border-top:1px solid var(--line);
-    text-align:center;
-    background:#03080f;
-}
-
-.footer h2{
-    font-size:2.2rem;
-    font-weight:400;
-    margin-bottom:12px;
-}
-
-.footer p{
-    color:#718795;
-    font-size:.9rem;
-}
-
-.footer small{
-    display:block;
-    margin-top:35px;
-    font-family:Arial,sans-serif;
-    color:#425664;
-    font-size:.65rem;
-    letter-spacing:2px;
-}
-
-/* =====================================================
-   MOBILE
-===================================================== */
-
-@media(max-width:850px){
-
-    .navbar{
-        padding:22px 5%;
-    }
-
-    .nav-links{
-        gap:14px;
-        font-size:.6rem;
-    }
-
-    .hero{
-        padding:130px 7% 90px;
-        min-height:900px;
-    }
-
-    .moon{
-        width:140px;
-        height:140px;
-        top:15%;
-        right:8%;
-    }
-
-    .hero h1{
-        font-size:clamp(3.2rem,12vw,5rem);
-        letter-spacing:-1px;
-    }
-
-    .hero-description{
-        font-size:.95rem;
-    }
-
-    .lighthouse{
-        right:5%;
-        bottom:9%;
-        transform:scale(.75);
-        transform-origin:bottom right;
-    }
-
-    .intro{
-        grid-template-columns:1fr;
-        gap:40px;
-    }
-
-    .intro-image{
-        min-height:320px;
-    }
-
-    .journal-grid{
-        grid-template-columns:1fr;
-    }
-
-    .section{
-        padding:85px 7%;
-    }
-
-    .journal-header{
-        display:block;
-    }
-
-    .letter-section{
-        padding:90px 7%;
-    }
-
-    .letter{
-        padding:40px 25px;
-    }
-
-    .letter h3{
-        font-size:2rem;
-    }
-
-}
-
-@media(prefers-reduced-motion:reduce){
-
-    *,
-    *::before,
-    *::after{
-        animation-duration:.01ms !important;
-        animation-iteration-count:1 !important;
-        scroll-behavior:auto !important;
-    }
-
-}
-
+  :root{
+    --bg-base:#0d1217;
+    --bg-panel:#131a22;
+    --bg-elevated:#1c2530;
+    --accent:#5b9cf6;
+    --accent-2:#48d597;
+    --text:#e6edf3;
+    --text-muted:#8b949e;
+    --border:#263445;
+    --success:#3fb950;
+    --danger:#f85149;
+    --radius:10px;
+    --mono:'IBM Plex Mono','SF Mono',Consolas,monospace;
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html{-webkit-font-smoothing:antialiased;}
+  body{background:var(--bg-base);color:var(--text);font-family:var(--sans);line-height:1.5;min-height:100vh;padding:40px 20px 90px;}
+  .wrap{max-width:1160px;margin:0 auto;}
+
+  .header{margin-bottom:36px;}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-2);margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+  .eyebrow-badge{background:rgba(72,213,151,.15);color:var(--accent-2);padding:2px 8px;border-radius:4px;font-size:11px;}
+  .header h1{font-family:var(--mono);font-size:clamp(26px,4vw,38px);font-weight:600;letter-spacing:-.01em;margin-bottom:14px;color:#fff;}
+  .header p{color:var(--text-muted);max-width:720px;font-size:14.5px;line-height:1.6;}
+
+  .layout{display:grid;grid-template-columns:1fr;gap:24px;}
+  @media (min-width:980px){
+    .layout{grid-template-columns:1.35fr 1fr;align-items:start;}
+    .preview-col{position:sticky;top:24px;}
+  }
+
+  .section{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);padding:22px 22px 26px;margin-bottom:20px;box-shadow:0 4px 20px rgba(0,0,0,.2);}
+  .section-label{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;}
+  .section-label .tag{color:var(--accent);}
+  .section-label .tag-green{color:var(--accent-2);}
+  .section h2{font-size:16px;font-weight:600;margin-bottom:16px;color:#fff;}
+
+  .field-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;}
+  .field{display:flex;flex-direction:column;gap:6px;}
+  .field label{font-size:13px;font-weight:500;}
+  .field .desc{font-size:12px;color:var(--text-muted);font-family:var(--mono);}
+  .field-hint{font-size:11.5px;color:var(--text-muted);font-family:var(--mono);margin-top:2px;line-height:1.4;}
+  .field-input-row{display:flex;gap:8px;}
+  input[type=text],input[type=number]{
+    background:var(--bg-elevated);border:1px solid var(--border);border-radius:7px;
+    padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:13px;width:100%;
+    transition:border-color .15s,box-shadow .15s;
+  }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+  input[type=number]{-moz-appearance:textfield;}
+  input::placeholder{color:#485666;}
+  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(91,156,246,.2);}
+  .btn-mini{
+    font-family:var(--sans);font-size:12px;padding:0 12px;border-radius:7px;
+    border:1px solid var(--border);background:var(--bg-elevated);color:var(--accent);
+    cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s,color .15s;
+  }
+  .btn-mini:hover{border-color:var(--accent);background:rgba(91,156,246,.12);color:#fff;}
+
+  /* Toggle Switches */
+  .toggle-list{display:flex;flex-direction:column;gap:16px;}
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;gap:16px;}
+  .toggle-row .name{font-size:14px;font-weight:500;}
+  .toggle-row .desc{font-size:12px;color:var(--text-muted);font-family:var(--mono);}
+  .switch{position:relative;width:44px;height:24px;flex-shrink:0;cursor:pointer;}
+  .switch input{position:absolute;inset:0;width:100%;height:100%;opacity:0;margin:0;cursor:pointer;z-index:2;}
+  .switch .track{position:absolute;inset:0;background:var(--bg-elevated);border:1px solid var(--border);border-radius:999px;transition:background .15s,border-color .15s;z-index:1;}
+  .switch .thumb{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--text-muted);transition:transform .15s,background .15s;}
+  .switch input:checked ~ .track{background:rgba(91,156,246,.2);border-color:var(--accent);}
+  .switch input:checked ~ .track .thumb{transform:translateX(20px);background:var(--accent);}
+
+  /* Protocol Grid */
+  .proto-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;}
+  .proto-card{
+    background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;
+    padding:16px;display:flex;flex-direction:column;gap:10px;
+    transition:border-color .15s,box-shadow .15s;
+  }
+  .proto-card.active{border-color:var(--accent-2);box-shadow:0 0 0 1px var(--accent-2);}
+  .proto-card-header{display:flex;align-items:center;justify-content:space-between;}
+  .proto-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;}
+  .proto-badge{font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(72,213,151,.15);color:var(--accent-2);font-family:var(--mono);}
+  .proto-var{font-family:var(--mono);font-size:11px;color:var(--text-muted);}
+
+  /* Terminal Preview Box */
+  .terminal{background:#080d12;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.35);}
+  .terminal-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;background:var(--bg-panel);border-bottom:1px solid var(--border);}
+  .dot{width:10px;height:10px;border-radius:50%;}
+  .dot-red{background:var(--danger);}
+  .dot-yellow{background:#d29922;}
+  .dot-green{background:var(--success);}
+  .terminal-title{margin-left:6px;font-family:var(--mono);font-size:12px;color:var(--text-muted);}
+  .terminal-body{padding:20px 18px;font-family:var(--mono);font-size:13px;line-height:1.75;min-height:140px;white-space:pre-wrap;word-break:break-all;color:#d0d7de;}
+  .prompt{color:var(--accent-2);margin-right:8px;user-select:none;}
+  #command-output .var{color:var(--accent);font-weight:600;}
+  .cursor{display:inline-block;color:var(--accent-2);animation:blink 1s step-end infinite;}
+  @media (prefers-reduced-motion:reduce){.cursor{animation:none;}}
+  @keyframes blink{50%{opacity:0;}}
+  .terminal-actions{display:flex;align-items:center;gap:10px;padding:14px 18px;border-top:1px solid var(--border);flex-wrap:wrap;}
+  .segmented{display:inline-flex;border:1px solid var(--border);border-radius:7px;overflow:hidden;}
+  .seg-btn{font-family:var(--mono);font-size:12px;padding:7px 14px;background:var(--bg-elevated);color:var(--text-muted);border:none;cursor:pointer;transition:background .15s,color .15s;}
+  .seg-btn.active{background:var(--accent);color:#fff;font-weight:600;}
+  .btn{font-family:var(--sans);font-size:13px;font-weight:600;padding:8px 16px;border-radius:7px;border:1px solid transparent;cursor:pointer;transition:background .15s,transform .05s;}
+  .btn:active{transform:scale(.98);}
+  .btn-accent{background:var(--accent);color:#fff;}
+  .btn-accent:hover{filter:brightness(1.12);}
+  .btn-accent.copied{background:var(--success);color:#fff;}
+  .btn-ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
+  .btn-ghost:hover{color:var(--text);border-color:var(--text-muted);}
+  .terminal-note{padding:0 18px 16px;font-size:12px;color:var(--text-muted);line-height:1.4;}
 </style>
 </head>
-
 <body>
+<div class="wrap">
 
-<div class="site-background"></div>
-<div class="stars" id="stars"></div>
-<div class="grain"></div>
-
-<!-- =====================================================
-     NAVIGATION
-===================================================== -->
-
-<header class="navbar">
-
-    <a href="#" class="logo">
-        Lighthouse <span>Keeper</span>
-    </a>
-
-    <nav>
-        <ul class="nav-links">
-            <li><a href="#journal">Journal</a></li>
-            <li><a href="#story">The Keeper</a></li>
-            <li><a href="#letter">Letters</a></li>
-        </ul>
-    </nav>
-
-</header>
-
-<!-- =====================================================
-     HERO
-===================================================== -->
-
-<section class="hero">
-
-    <div class="moon"></div>
-
-    <div class="lighthouse">
-
-        <div class="lighthouse-beam"></div>
-        <div class="lighthouse-roof"></div>
-        <div class="lighthouse-room"></div>
-        <div class="lighthouse-tower"></div>
-
+  <div class="header">
+    <div class="eyebrow">
+      <span>XTLS/Xray-Core</span>
+      <span class="eyebrow-badge">One-line Install</span>
     </div>
+    <h1>Xray 部署面板</h1>
+    <p>可视化定制 Xray 服务端参数与协议矩阵。右侧终端将实时同步生成对应的 Linux 一键命令、Docker 容器启动指令或环境变量配置，一键复制后粘贴至服务器即可秒级上线。</p>
+  </div>
 
-    <div class="sea"></div>
+  <div class="layout">
+    <div class="form-col">
 
-    <div class="hero-content">
-
-        <div class="eyebrow">
-            A Coastal Journal · Est. 1927
-        </div>
-
-        <h1>
-            The<br>
-            <em>Lighthouse</em><br>
-            Keeper
-        </h1>
-
-        <p class="hero-description">
-            Stories from the edge of the world.
-            A quiet journal of saltwater, distant storms,
-            and the man who kept the light burning
-            when everyone else had gone home.
-        </p>
-
-        <a href="#journal" class="hero-button">
-            Enter the journal
-        </a>
-
-    </div>
-
-</section>
-
-<!-- =====================================================
-     INTRODUCTION
-===================================================== -->
-
-<section class="section intro" id="story">
-
-    <div class="intro-image"></div>
-
-    <div class="intro-text">
-
-        <div class="section-label">
-            The Island · Chapter One
-        </div>
-
-        <h2 class="section-title">
-            A House<br>
-            Above the Water
-        </h2>
-
-        <p>
-            There is a lighthouse at the northern edge of the island.
-            It stands against the wind, facing an ocean that has no memory.
-        </p>
-
-        <p>
-            Every evening, as the sun disappears behind the horizon,
-            a single light begins its slow rotation.
-        </p>
-
-        <p>
-            Inside the tower lives a keeper.
-            He knows the weather by its smell,
-            the sea by its color,
-            and the passing years by the ships
-            that no longer return.
-        </p>
-
-    </div>
-
-</section>
-
-<div class="divider"></div>
-
-<!-- =====================================================
-     JOURNAL
-===================================================== -->
-
-<section class="section" id="journal">
-
-    <div class="journal-header">
-
-        <div>
-            <div class="section-label">
-                From the logbook
+      <!-- 1. 基础配置 -->
+      <div class="section">
+        <div class="section-label"><span class="tag">基础</span> · 核心参数</div>
+        <h2>全局参数</h2>
+        <div class="field-row">
+          <div class="field">
+            <label for="field-uuid">用户 UUID</label>
+            <div class="field-input-row">
+              <input type="text" id="field-uuid" placeholder="留空自动生成并持久化">
+              <button type="button" class="btn-mini" id="gen-uuid">随机</button>
             </div>
+            <span class="desc">UUID</span>
+          </div>
+          <div class="field">
+            <label for="field-port">主 HTTP 端口</label>
+            <div class="field-input-row">
+              <input type="number" id="field-port" placeholder="自动搜寻 (默认 3000)">
+              <button type="button" class="btn-mini" id="gen-port">随机</button>
+            </div>
+            <span class="desc">PORT</span>
+          </div>
+          <div class="field">
+            <label for="field-name">节点名称前缀</label>
+            <input type="text" id="field-name" placeholder="自动探测地区 (如 JP-IIJ)">
+            <span class="desc">NAME</span>
+          </div>
+          <div class="field">
+            <label for="field-sub">订阅路径后缀</label>
+            <input type="text" id="field-sub" placeholder="默认 sub（即 /sub）">
+            <span class="desc">SUB</span>
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="field-public-ip">自定义公网 IP / 域名</label>
+            <input type="text" id="field-public-ip" placeholder="留空自动多源并发探测（NAT 机请填写公网映射 IP）">
+            <span class="desc">PUBLIC_IP</span>
+          </div>
+        </div>
+      </div>
 
-            <h2 class="section-title">
-                Notes from<br>
-                the Lighthouse
-            </h2>
+      <!-- 2. Argo 隧道配置 -->
+      <div class="section">
+        <div class="section-label"><span class="tag-green">Argo</span> · CDN 穿透 (六合一单端口智能分流)</div>
+        <h2>Cloudflare 隧道</h2>
+        <div class="field-row">
+          <div class="field">
+            <label for="field-argo-port">Argo 内部聚合端口</label>
+            <div class="field-input-row">
+              <input type="number" id="field-argo-port" placeholder="默认 8001">
+              <button type="button" class="btn-mini" id="gen-argo-port">随机</button>
+            </div>
+            <span class="desc">ARGO_PORT</span>
+          </div>
+          <div class="field">
+            <label for="field-argo-domain">Argo 固定域名</label>
+            <input type="text" id="field-argo-domain" placeholder="留空使用临时 Quick Tunnel">
+            <span class="desc">ARGO_DOMAIN</span>
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="field-argo-auth">Argo Token / 凭证</label>
+            <input type="text" id="field-argo-auth" placeholder="固定隧道的 TUNNEL_TOKEN，留空则申请临时隧道">
+            <span class="desc">ARGO_AUTH</span>
+          </div>
         </div>
 
-        <p class="section-intro">
-            Three entries from a winter spent at the edge of the sea.
-        </p>
-
-    </div>
-
-    <div class="journal-grid">
-
-        <article class="journal-card">
-
-            <div class="card-number">01 / 03</div>
-
-            <h3>
-                The First Storm
-            </h3>
-
-            <p>
-                The wind arrived before dawn.
-                By breakfast, the sea had turned black.
-                I watched the waves climb the rocks
-                and wondered how many stories
-                were hidden beneath them.
-            </p>
-
-            <span class="card-date">
-                NOVEMBER 14 · 05:40 AM
-            </span>
-
-        </article>
-
-        <article class="journal-card">
-
-            <div class="card-number">02 / 03</div>
-
-            <h3>
-                A Light in the Distance
-            </h3>
-
-            <p>
-                A ship passed tonight.
-                Its windows glowed like small stars
-                across the dark water.
-                I stood by the lantern room
-                until the last light disappeared.
-            </p>
-
-            <span class="card-date">
-                NOVEMBER 21 · 11:18 PM
-            </span>
-
-        </article>
-
-        <article class="journal-card">
-
-            <div class="card-number">03 / 03</div>
-
-            <h3>
-                When the Sea Is Quiet
-            </h3>
-
-            <p>
-                There are nights when the ocean
-                makes no sound at all.
-                On those nights, I can hear the clock,
-                the old wooden floor,
-                and the beating of my own heart.
-            </p>
-
-            <span class="card-date">
-                DECEMBER 03 · 02:15 AM
-            </span>
-
-        </article>
-
-    </div>
-
-</section>
-
-<!-- =====================================================
-     QUOTE
-===================================================== -->
-
-<section class="letter-section" id="letter">
-
-    <div class="section-label">
-        A Letter Never Sent
-    </div>
-
-    <h2 class="section-title">
-        To Whoever<br>
-        Is Still Out There
-    </h2>
-
-    <div class="letter">
-
-        <div class="letter-label">
-            From the northern lighthouse
+        <div style="margin-top:20px;">
+          <div class="toggle-list">
+            <div class="toggle-row">
+              <div>
+                <div class="name">彻底禁用 Argo 隧道</div>
+                <div class="desc">DISABLE_ARGO=true (仅运行直连协议)</div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-disable-argo">
+                <div class="track"><div class="thumb"></div></div>
+              </label>
+            </div>
+          </div>
         </div>
 
-        <h3>
-            The Light Is Still On
-        </h3>
-
-        <p>
-            If you are reading this,
-            perhaps you are somewhere far from home.
-        </p>
-
-        <p>
-            Perhaps the night is longer than you expected,
-            and the road ahead is difficult to see.
-        </p>
-
-        <p>
-            I cannot tell you where the shore is.
-            I cannot promise that the storm will pass soon.
-        </p>
-
-        <p>
-            But I can leave the light on.
-        </p>
-
-        <p>
-            So when the sea becomes dark,
-            remember that somewhere,
-            someone is still watching.
-        </p>
-
-        <div class="letter-signature">
-            Yours beneath the lighthouse,<br>
-            The Keeper
+        <div style="margin-top:16px;">
+          <div class="field">
+            <label for="field-cf-prefer">Cloudflare 优选域名 / IP</label>
+            <div class="field-input-row">
+              <input type="text" id="field-cf-prefer" placeholder="默认内置候选池自测（推荐留空）">
+              <button type="button" class="btn-mini" id="gen-cf-prefer">随机</button>
+            </div>
+            <span class="desc">CF_PREFER_HOST</span>
+            <span class="field-hint">CDN 节点客户端连接地址，支持填写如 www.visa.com.tw、www.visa.com.sg、ip.sb 等优选 IP</span>
+          </div>
         </div>
+      </div>
+
+      <!-- 3. 直连协议配置 -->
+      <div class="section">
+        <div class="section-label"><span class="tag">直连</span> · 原生协议矩阵</div>
+        <h2>直连协议端口 (填写端口即开启，留空不开启)</h2>
+        <div class="proto-grid">
+
+          <!-- VLESS-Reality -->
+          <div class="proto-card" id="card-reality" style="grid-column: 1 / -1;">
+            <div class="proto-card-header">
+              <span class="proto-name">VLESS-Reality <span class="proto-badge">Vision 原生流控 · 核心推荐</span></span>
+              <span class="proto-var">REALITY_PORT</span>
+            </div>
+            <div class="field-row" style="margin-top:4px;">
+              <div class="field">
+                <label>监听端口</label>
+                <div class="field-input-row">
+                  <input type="number" id="input-reality" placeholder="推荐 443 或自定义高位">
+                  <button type="button" class="btn-mini btn-proto-rand" data-key="reality">生成</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>伪装站点 SNI (自动 TLS 1.3 探测)</label>
+                <div class="field-input-row">
+                  <input type="text" id="field-reality-domain" placeholder="默认地域自适应 (如 www.iij.ad.jp)">
+                  <button type="button" class="btn-mini" id="gen-reality-domain">切换</button>
+                </div>
+              </div>
+            </div>
+            <span class="field-hint">内置日本 IIJ、香港 HKT、新加坡、美国及欧洲本土骨干合规站点池，规避大厂顶级域名 ASN 不符风控。</span>
+          </div>
+
+          <!-- Shadowsocks 2022 -->
+          <div class="proto-card" id="card-ss">
+            <div class="proto-card-header">
+              <span class="proto-name">Shadowsocks 2022</span>
+              <span class="proto-var">SS_PORT</span>
+            </div>
+            <div class="field-input-row">
+              <input type="number" id="input-ss" placeholder="留空不启用">
+              <button type="button" class="btn-mini btn-proto-rand" data-key="ss">生成</button>
+            </div>
+            <span class="desc">2022-blake3-aes-128-gcm</span>
+          </div>
+
+          <!-- Socks5 -->
+          <div class="proto-card" id="card-s5">
+            <div class="proto-card-header">
+              <span class="proto-name">SOCKS5 代理</span>
+              <span class="proto-var">S5_PORT</span>
+            </div>
+            <div class="field-input-row">
+              <input type="number" id="input-s5" placeholder="留空不启用">
+              <button type="button" class="btn-mini btn-proto-rand" data-key="s5">生成</button>
+            </div>
+            <span class="desc">支持 TCP / UDP 密码鉴权</span>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- 4. Komari 探针监控 -->
+      <div class="section">
+        <div class="section-label"><span class="tag">监控</span> · 可选探针</div>
+        <h2>Komari 探针上报</h2>
+        <div class="field-row">
+          <div class="field">
+            <label for="field-komari-domain">服务端域名 / IP:PORT</label>
+            <input type="text" id="field-komari-domain" placeholder="如 komari.example.com">
+            <span class="desc">KOMARI_DOMAIN</span>
+          </div>
+          <div class="field">
+            <label for="field-komari-token">探针 Token</label>
+            <input type="text" id="field-komari-token" placeholder="留空不启用探针">
+            <span class="desc">KOMARI_TOKEN</span>
+          </div>
+        </div>
+      </div>
 
     </div>
 
-</section>
+    <!-- 右侧命令终端预览 -->
+    <div class="preview-col">
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="dot dot-red"></span>
+          <span class="dot dot-yellow"></span>
+          <span class="dot dot-green"></span>
+          <span class="terminal-title" id="terminal-tab-name">xray-deploy.sh</span>
+        </div>
+        <div class="terminal-body">
+          <span class="prompt">$</span><span id="command-output"></span><span class="cursor">▌</span>
+        </div>
+        <div class="terminal-actions">
+          <div class="segmented">
+            <button type="button" class="seg-btn active" data-type="curl">curl</button>
+            <button type="button" class="seg-btn" data-type="wget">wget</button>
+            <button type="button" class="seg-btn" data-type="docker">docker</button>
+            <button type="button" class="seg-btn" data-type="env">env</button>
+          </div>
+          <button type="button" class="btn btn-accent" id="copy-btn">复制指令</button>
+          <button type="button" class="btn btn-ghost" id="reset-btn">重置</button>
+        </div>
+        <div class="terminal-note" id="terminal-tip">提示：支持 curl、wget 一键脚本、Docker 容器启动指令或直接导出 .env 配置文件。</div>
+      </div>
+    </div>
+  </div>
 
-<!-- =====================================================
-     FOOTER
-===================================================== -->
-
-<footer class="footer">
-
-    <h2>Lighthouse Keeper</h2>
-
-    <p>
-        A journal of sea, solitude, and the light that remains.
-    </p>
-
-    <small>
-        © 2026 LIGHTHOUSE KEEPER · A FICTIONAL COASTAL JOURNAL
-    </small>
-
-</footer>
-
+</div>
 <script>
+(function(){
+  const SCRIPT_URL = 'https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh';
+  const DOCKER_IMAGE = 'ghcr.io/zaofengyue/xray:latest';
 
-/* =====================================================
-   GENERATE STARS
-===================================================== */
+  const REALITY_DOMAIN_POOL = [
+    'www.iij.ad.jp', 'www.rakuten.co.jp',
+    'gateway.icloud.com', 'dl.fedoraproject.org',
+    'www.hkt.com', 'www.hkix.net',
+    'www.starhub.com', 'www.myrepublic.net',
+    'www.ovh.com', 'debian.mirror.liteserver.nl'
+  ];
 
-const stars = document.getElementById("stars");
+  const CF_PREFER_HOST_POOL = [
+    'www.visa.com.tw', 'www.visa.com.sg', 'www.visa.com.hk',
+    'ip.sb', 'cf.877774.xyz', 'cf.090227.xyz', 'skk.moe', 'time.is'
+  ];
 
-for(let i = 0; i < 110; i++){
+  const state = {
+    uuid: '', port: '', name: '', sub: '', publicIp: '',
+    argoPort: '', argoDomain: '', argoAuth: '', disableArgo: false, cfPrefer: '',
+    reality: '', realityDomain: '',
+    ss: '', s5: '',
+    komariDomain: '', komariToken: '',
+    cmdType: 'curl'
+  };
 
-    const star = document.createElement("span");
+  function randPort(){ return String(10000 + Math.floor(Math.random() * 55535)); }
 
-    star.className = "star";
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
 
-    star.style.left = Math.random() * 100 + "%";
-    star.style.top = Math.random() * 100 + "%";
+  function buildPairs(){
+    const p = [];
+    if(state.uuid)          p.push(['UUID',           state.uuid,         false]);
+    if(state.port)          p.push(['PORT',           state.port,         false]);
+    if(state.name)          p.push(['NAME',           state.name,         false]);
+    if(state.sub)           p.push(['SUB',            state.sub,          false]);
+    if(state.publicIp)      p.push(['PUBLIC_IP',      state.publicIp,     false]);
+    if(state.argoPort)      p.push(['ARGO_PORT',      state.argoPort,     false]);
+    if(state.argoDomain)    p.push(['ARGO_DOMAIN',    state.argoDomain,   false]);
+    if(state.argoAuth)      p.push(['ARGO_AUTH',      state.argoAuth,     true]);
+    if(state.disableArgo)   p.push(['DISABLE_ARGO',   'true',             false]);
+    if(state.cfPrefer)      p.push(['CF_PREFER_HOST', state.cfPrefer,     false]);
+    if(state.reality)       p.push(['REALITY_PORT',   state.reality,      false]);
+    if(state.realityDomain) p.push(['REALITY_DOMAIN', state.realityDomain,false]);
+    if(state.ss)            p.push(['SS_PORT',        state.ss,           false]);
+    if(state.s5)            p.push(['S5_PORT',        state.s5,           false]);
+    if(state.komariDomain)  p.push(['KOMARI_DOMAIN',  state.komariDomain, false]);
+    if(state.komariToken)   p.push(['KOMARI_TOKEN',   state.komariToken,  false]);
+    return p;
+  }
 
-    star.style.animationDelay =
-        Math.random() * 5 + "s";
+  function formatVal(v, forceQuote){
+    if(forceQuote || /[\s"'\\`$|&;()<>]/.test(v)) return `"${v}"`;
+    return v;
+  }
 
-    star.style.animationDuration =
-        3 + Math.random() * 5 + "s";
+  function formatValHtml(v, forceQuote){
+    if(forceQuote || /[\s"'\\`$|&;()<>]/.test(v)) return `"${escapeHtml(v)}"`;
+    return escapeHtml(v);
+  }
 
-    star.style.transform =
-        "scale(" + (0.5 + Math.random() * 1.5) + ")";
+  function plainCommand(){
+    const pairs = buildPairs();
+    if(state.cmdType === 'docker'){
+      let doc = `docker run -d --name xray --restart always`;
+      const portVal = state.port || '3000';
+      doc += ` -p ${portVal}:${portVal}`;
+      if(state.reality) doc += ` -p ${state.reality}:${state.reality}`;
+      if(state.ss)      doc += ` -p ${state.ss}:${state.ss}`;
+      if(state.s5)      doc += ` -p ${state.s5}:${state.s5}`;
+      for(const [k, v] of pairs){
+        doc += ` -e ${k}=${formatVal(v, true)}`;
+      }
+      doc += ` ${DOCKER_IMAGE}`;
+      return doc;
+    }
+    if(state.cmdType === 'env'){
+      return pairs.map(([k, v]) => `${k}="${v}"`).join('\n');
+    }
+    const envStr = pairs.map(([k, v, q]) => `${k}=${formatVal(v, q)}`).join(' ');
+    const fetcher = state.cmdType === 'curl'
+      ? `bash <(curl -fsSL ${SCRIPT_URL})`
+      : `bash <(wget -qO- ${SCRIPT_URL})`;
+    return (envStr ? envStr + ' ' : '') + fetcher;
+  }
 
-    stars.appendChild(star);
+  function render(){
+    const pairs = buildPairs();
+    const tabName = document.getElementById('terminal-tab-name');
+    const tip = document.getElementById('terminal-tip');
 
-}
+    if(state.cmdType === 'docker'){
+      tabName.textContent = 'docker run';
+      tip.textContent = '已映射所需外部直连端口与环境参数，直接执行即可启动容器。';
+      let docHtml = `docker run -d --name xray --restart always`;
+      const portVal = state.port || '3000';
+      docHtml += ` -p ${escapeHtml(portVal)}:${escapeHtml(portVal)}`;
+      if(state.reality) docHtml += ` -p ${escapeHtml(state.reality)}:${escapeHtml(state.reality)}`;
+      if(state.ss)      docHtml += ` -p ${escapeHtml(state.ss)}:${escapeHtml(state.ss)}`;
+      if(state.s5)      docHtml += ` -p ${escapeHtml(state.s5)}:${escapeHtml(state.s5)}`;
+      for(const [k, v] of pairs){
+        docHtml += ` -e <span class="var">${escapeHtml(k)}</span>=${formatValHtml(v, true)}`;
+      }
+      docHtml += ` ${escapeHtml(DOCKER_IMAGE)}`;
+      document.getElementById('command-output').innerHTML = docHtml;
+      return;
+    }
 
-/* =====================================================
-   SUBTLE PARALLAX
-===================================================== */
+    if(state.cmdType === 'env'){
+      tabName.textContent = 'config.env';
+      tip.textContent = '可直接保存至 VPS 目录 ~/xray/config.env 或用于 Docker Compose。';
+      const envHtml = pairs.map(([k, v]) => `<span class="var">${escapeHtml(k)}</span>="${escapeHtml(v)}"`).join('\n');
+      document.getElementById('command-output').innerHTML = envHtml || '# 无自定义配置（全部采用内置默认值）';
+      return;
+    }
 
-const moon = document.querySelector(".moon");
-const lighthouse = document.querySelector(".lighthouse");
+    tabName.textContent = state.cmdType === 'curl' ? 'curl | bash' : 'wget | bash';
+    tip.textContent = '复制后直接在 VPS root 终端粘贴回车执行即可完成部署。';
+    const envHtml = pairs.map(([k, v, q]) => `<span class="var">${escapeHtml(k)}</span>=${formatValHtml(v, q)}`).join(' ');
+    const lt = '&lt;';
+    const fetcherHtml = state.cmdType === 'curl'
+      ? `bash ${lt}(curl -fsSL ${escapeHtml(SCRIPT_URL)})`
+      : `bash ${lt}(wget -qO- ${escapeHtml(SCRIPT_URL)})`;
+    document.getElementById('command-output').innerHTML = (envHtml ? envHtml + ' ' : '') + fetcherHtml;
+  }
 
-if(!window.matchMedia("(prefers-reduced-motion: reduce)").matches){
+  function updateProtoCard(key){
+    const card = document.getElementById('card-' + key);
+    if(card) card.classList.toggle('active', !!state[key]);
+  }
 
-    window.addEventListener("scroll", () => {
-
-        const y = window.scrollY;
-
-        if(y < window.innerHeight){
-
-            moon.style.transform =
-                "translateY(" + y * 0.08 + "px)";
-
-            lighthouse.style.transform =
-                "translateY(" + y * 0.03 + "px)";
-
-        }
-
+  document.querySelectorAll('.btn-proto-rand').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.key;
+      const p = randPort();
+      state[key] = p;
+      const input = document.getElementById('input-' + key);
+      if(input) input.value = p;
+      updateProtoCard(key);
+      render();
     });
+  });
 
-}
+  ['reality', 'ss', 's5'].forEach(key => {
+    const el = document.getElementById('input-' + key);
+    if(el){
+      el.addEventListener('input', e => {
+        state[key] = e.target.value.trim();
+        updateProtoCard(key);
+        render();
+      });
+    }
+  });
 
+  document.getElementById('gen-port').addEventListener('click', () => {
+    const p = randPort(); document.getElementById('field-port').value = p; state.port = p; render();
+  });
+  document.getElementById('gen-argo-port').addEventListener('click', () => {
+    const p = randPort(); document.getElementById('field-argo-port').value = p; state.argoPort = p; render();
+  });
+
+  document.getElementById('gen-reality-domain').addEventListener('click', () => {
+    let pool = REALITY_DOMAIN_POOL;
+    if(state.realityDomain){
+      const filtered = pool.filter(d => d !== state.realityDomain);
+      if(filtered.length) pool = filtered;
+    }
+    const d = pool[Math.floor(Math.random() * pool.length)];
+    document.getElementById('field-reality-domain').value = d;
+    state.realityDomain = d;
+    render();
+  });
+
+  document.getElementById('gen-cf-prefer').addEventListener('click', () => {
+    let pool = CF_PREFER_HOST_POOL;
+    if(state.cfPrefer){
+      const filtered = pool.filter(d => d !== state.cfPrefer);
+      if(filtered.length) pool = filtered;
+    }
+    const d = pool[Math.floor(Math.random() * pool.length)];
+    document.getElementById('field-cf-prefer').value = d;
+    state.cfPrefer = d;
+    render();
+  });
+
+  document.getElementById('gen-uuid').addEventListener('click', () => {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, x => x.toString(16).padStart(2, '0'));
+    const gen = `${h.slice(0,4).join('')}-${h.slice(4,6).join('')}-${h.slice(6,8).join('')}-${h.slice(8,10).join('')}-${h.slice(10).join('')}`;
+    document.getElementById('field-uuid').value = gen;
+    state.uuid = gen;
+    render();
+  });
+
+  [
+    ['field-uuid', 'uuid'],
+    ['field-port', 'port'],
+    ['field-name', 'name'],
+    ['field-sub', 'sub'],
+    ['field-public-ip', 'publicIp'],
+    ['field-argo-port', 'argoPort'],
+    ['field-argo-domain', 'argoDomain'],
+    ['field-argo-auth', 'argoAuth'],
+    ['field-cf-prefer', 'cfPrefer'],
+    ['field-reality-domain', 'realityDomain'],
+    ['field-komari-domain', 'komariDomain'],
+    ['field-komari-token', 'komariToken']
+  ].forEach(([id, key]) => {
+    const el = document.getElementById(id);
+    if(el){
+      el.addEventListener('input', e => { state[key] = e.target.value.trim(); render(); });
+    }
+  });
+
+  document.getElementById('toggle-disable-argo').addEventListener('change', e => {
+    state.disableArgo = e.target.checked;
+    render();
+  });
+
+  document.querySelectorAll('.seg-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.cmdType = btn.dataset.type;
+      document.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b === btn));
+      render();
+    });
+  });
+
+  document.getElementById('copy-btn').addEventListener('click', async () => {
+    const text = plainCommand();
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch(e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    const btn = document.getElementById('copy-btn');
+    btn.textContent = '✓ 已复制到剪贴板';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = '复制指令';
+      btn.classList.remove('copied');
+    }, 1800);
+  });
+
+  document.getElementById('reset-btn').addEventListener('click', () => {
+    Object.keys(state).forEach(k => {
+      state[k] = k === 'cmdType' ? 'curl' : (k === 'disableArgo' ? false : '');
+    });
+    [
+      'field-uuid', 'field-port', 'field-name', 'field-sub', 'field-public-ip',
+      'field-argo-port', 'field-argo-domain', 'field-argo-auth', 'field-cf-prefer',
+      'field-reality-domain', 'field-komari-domain', 'field-komari-token'
+    ].forEach(id => {
+      const el = document.getElementById(id);
+      if(el) el.value = '';
+    });
+    document.getElementById('toggle-disable-argo').checked = false;
+    ['reality', 'ss', 's5'].forEach(k => {
+      const el = document.getElementById('input-' + k);
+      if(el) el.value = '';
+      updateProtoCard(k);
+    });
+    document.querySelectorAll('.seg-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
+    render();
+  });
+
+  render();
+})();
 </script>
-
 </body>
 </html>
-```
-
-### 这版有什么不一样？
-
-<box gap={3}>
-  <row align="start" gap={3}>
-    <AsyncImage query="cinematic lighthouse warm lantern light dark ocean" aspectRatio="1:1" maxWidth="84px"/>
-    <box flex="1" gap={1}>
-      <title size="md">电影感首屏</title>
-      月亮、灯塔剪影、暖色灯光和深海背景，形成冷暖对比。
-    </box>
-  </row>
-  <divider color="subtle"/>
-  <row align="start" gap={3}>
-    <AsyncImage query="old lighthouse keeper journal handwritten logbook candlelight" aspectRatio="1:1" maxWidth="84px"/>
-    <box flex="1" gap={1}>
-      <title size="md">完整杂志内容</title>
-      有故事章节、航海日志、未寄出的信件和电影式文字。
-    </box>
-  </row>
-  <divider color="subtle"/>
-  <row align="start" gap={3}>
-    <AsyncImage query="moody dark ocean lighthouse stars night" aspectRatio="1:1" maxWidth="84px"/>
-    <box flex="1" gap={1}>
-      <title size="md">沉浸式细节</title>
-      星空闪烁、月亮浮动、海面纹理、灯塔光束和胶片颗粒。
-    </box>
-  </row>
-</box>
-
-**注意：** 页面中的灯塔和星空是 CSS 绘制的；正文里的灯塔摄影使用了外部图片链接。如果你希望完全离线打开，我也可以把摄影背景替换为纯 CSS 或内嵌 SVG 版本。
