@@ -70,7 +70,9 @@ XRAY_CLIENT_FILE="$APP_DIR/xray_client.json"
 LOG_FILE="$APP_DIR/run.log"
 CF_LOG="$APP_DIR/cf.log"
 KM_LOG="$APP_DIR/komari.log"
+TURN2SOCKS_LOG="$APP_DIR/turn2socks.log"
 PID_FILE="$APP_DIR/xray.pid"
+TURN2SOCKS_PID="$APP_DIR/turn2socks.pid"
 SVC_NAME="xray"
 
 # 受保护的二进制目录
@@ -78,6 +80,7 @@ BIN_DIR="/tmp/xray-bin-$(id -u 2>/dev/null || echo 0)"
 XRAY_BIN="$BIN_DIR/xray"
 CF_BIN="$BIN_DIR/cloudflared"
 KM_BIN="$BIN_DIR/komari-agent"
+TURN2SOCKS_BIN="$BIN_DIR/turn2socks"
 ACME_HOME="$STATE_DIR/acme"
 
 mkdir -p "$APP_DIR" "$STATE_DIR" "$BIN_DIR" "$DOMAIN_CERT_DIR" 2>/dev/null || true
@@ -338,6 +341,93 @@ download_komari() {
   chmod +x "$KM_BIN"
   log "Komari-agent 部署就绪"
   return 0
+}
+
+download_turn2socks() {
+  local t2s_arch="amd64"
+  case "$(uname -m)" in
+    aarch64|arm64) t2s_arch="arm64" ;;
+    *)             t2s_arch="amd64" ;;
+  esac
+
+  if [ -x "$TURN2SOCKS_BIN" ]; then
+    return 0
+  fi
+
+  # 优先检测本地源码目录并尝试由本地 Go 编译
+  if [ -d "$APP_DIR/turn2socks" ] && command -v go >/dev/null 2>&1; then
+    log "检测到本地 Go 环境，正在编译 turn2socks..."
+    if (cd "$APP_DIR/turn2socks" && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o "$TURN2SOCKS_BIN" .) >/dev/null 2>&1; then
+      chmod +x "$TURN2SOCKS_BIN"
+      log "turn2socks 本地编译成功"
+      return 0
+    fi
+  fi
+
+  log "正在下载 turn2socks 二进制 (${t2s_arch})..."
+  local url="https://github.com/zaofengyue/singbox/releases/latest/download/turn2socks-linux-${t2s_arch}"
+  if download_file "$url" "$TURN2SOCKS_BIN"; then
+    chmod +x "$TURN2SOCKS_BIN"
+    log "turn2socks 部署就绪"
+    return 0
+  fi
+  warn "turn2socks 下载或编译失败"
+  return 1
+}
+
+stop_turn2socks() {
+  if [ -f "$TURN2SOCKS_PID" ]; then
+    local p
+    p="$(cat "$TURN2SOCKS_PID" 2>/dev/null)"
+    [ -n "$p" ] && kill "$p" 2>/dev/null || true
+    rm -f "$TURN2SOCKS_PID" 2>/dev/null || true
+  fi
+  pkill -x "turn2socks" 2>/dev/null || true
+}
+
+start_turn2socks() {
+  [ -f "$OUTBOUND_FILE" ] || return 0
+  local o_type
+  o_type="$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  [ "$o_type" = "turn" ] || return 0
+
+  local addr port user pass lport
+  addr="$(grep '^HOST=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  port="$(grep '^PORT=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  user="$(grep '^USER=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  pass="$(grep '^PASS=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  lport="$(grep '^LOCAL_PORT=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  [ -z "$lport" ] && lport=10808
+  [ -z "$port" ] && port=3478
+  [ -z "$addr" ] && return 0
+
+  stop_turn2socks
+  if [ ! -x "$TURN2SOCKS_BIN" ]; then
+    download_turn2socks || { warn "无法启动 turn2socks: 二进制不存在"; return 1; }
+  fi
+
+  local turn_host="$addr"
+  case "$turn_host" in
+    *:*)
+      turn_host="${turn_host#\[}"
+      turn_host="${turn_host%\]*}"
+      turn_host="[${turn_host}]"
+      ;;
+  esac
+  local args=(-listen "127.0.0.1:${lport}" -turn "${turn_host}:${port}")
+  [ -n "$user" ] && args+=(-user "$user")
+
+  TURN_PASS="$pass" nohup "$TURN2SOCKS_BIN" "${args[@]}" >> "$TURN2SOCKS_LOG" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$TURN2SOCKS_PID"
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    log "turn2socks 转接服务已就绪 (PID: $pid, 本地监听 127.0.0.1:${lport})"
+    return 0
+  else
+    warn "turn2socks 启动失败，请检查 $TURN2SOCKS_LOG"
+    return 1
+  fi
 }
 
 ensure_binaries() {
@@ -722,40 +812,64 @@ EOF
   press_any_key
 }
 
+prompt_route_mode() {
+  echo -e "${GRAY}------------------------------------------------------------${RESET}" >&2
+  echo -e "请选择分流模式:" >&2
+  echo -e "${WHITE}1. 智能分流 (推荐: 仅 Netflix/ChatGPT/Gemini/流媒体走出口代理，其余直连)${RESET}" >&2
+  echo -e "${WHITE}2. 全局代理 (所有出站流量统一走出口代理)${RESET}" >&2
+  echo -e "${GRAY}------------------------------------------------------------${RESET}" >&2
+  local rm_opt
+  read -p "选项 [默认 1]: " rm_opt
+  if [ "${rm_opt:-1}" = "2" ]; then
+    printf 'global'
+  else
+    printf 'split'
+  fi
+}
+
 menu_outbound() {
   clear
   echo -e "${GREEN}==================== 出口设置与落地分流 ====================${RESET}"
-  local cur_type="direct" cur_mode="直连"
+  local cur_type="direct" cur_mode="直连" cur_addr="" cur_port=""
   if [ -f "$OUTBOUND_FILE" ]; then
     cur_type="$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+    cur_addr="$(grep '^HOST=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+    cur_port="$(grep '^PORT=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
     local r_m
     r_m="$(grep '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
     [ "$r_m" = "split" ] && cur_mode="智能分流 (AI/流媒体解锁)"
     [ "$r_m" = "global" ] && cur_mode="全局代理 (全走出口)"
   fi
-  echo -e "当前出站模式: ${CYAN}${cur_type}${RESET} [分流策略: ${GREEN}${cur_mode}${RESET}]"
+  if [ "$cur_type" = "direct" ]; then
+    echo -e "当前出站模式: ${CYAN}原生直连 (默认)${RESET}"
+  elif [ "$cur_type" = "warp" ]; then
+    echo -e "当前出站模式: ${CYAN}Cloudflare WARP (WireGuard)${RESET} [模式: ${GREEN}${cur_mode}${RESET}]"
+  else
+    echo -e "当前出站模式: ${CYAN}${cur_type}${RESET} -> ${CYAN}${cur_addr}:${cur_port}${RESET} [模式: ${GREEN}${cur_mode}${RESET}]"
+  fi
   echo -e "${GREEN}------------------------------------------------------------${RESET}"
-  echo -e "${WHITE}1. 配置 Cloudflare WARP 原生出口 (解锁 ChatGPT/Netflix/Gemini)${RESET}"
-  echo -e "${WHITE}2. 配置前置 SOCKS5 链式代理出口${RESET}"
-  echo -e "${WHITE}3. 配置前置 HTTP 链式代理出口${RESET}"
-  echo -e "${WHITE}4. 恢复原生直连出口 (清除全部外置出站)${RESET}"
+  echo -e "${WHITE}1. 设置 SOCKS5 出口代理${RESET}"
+  echo -e "${WHITE}2. 设置 HTTP 出口代理${RESET}"
+  echo -e "${WHITE}3. 设置 TURN 穿透出口 (基于 turn2socks 转接)${RESET}"
+  echo -e "${WHITE}4. 设置 Cloudflare WARP 原生出口 (WireGuard 解锁 AI/流媒体)${RESET}"
+  echo -e "${WHITE}5. 切换分流模式 (智能分流 / 全局代理)${RESET}"
+  echo -e "${WHITE}6. 恢复原生直连出口 (清除全部外置出站)${RESET}"
   echo -e "${WHITE}0. 返回上一级菜单${RESET}"
   echo -e "${GREEN}------------------------------------------------------------${RESET}"
-  read -p "请输入选项: " o_opt
+  read -p "请输入选项 [0-6]: " o_opt
   case "$o_opt" in
-    1) setup_warp_outbound ;;
-    2|3)
+    1|2)
       local proto="socks"
-      [ "$o_opt" = "3" ] && proto="http"
+      [ "$o_opt" = "2" ] && proto="http"
       read -p "代理服务器 IP/域名: " p_host
       read -p "代理端口: " p_port
       read -p "用户名 (留空无认证): " p_user
       local p_pass=""
       [ -n "$p_user" ] && read -p "密码: " p_pass
       if [ -n "$p_host" ] && [ -n "$p_port" ]; then
-        read -p "分流模式 [1. 智能分流 / 2. 全局代理，默认 1]: " r_m_opt
-        local r_m="split"
-        [ "${r_m_opt:-1}" = "2" ] && r_m="global"
+        local r_m
+        r_m="$(prompt_route_mode)"
+        stop_turn2socks 2>/dev/null || true
         cat > "$OUTBOUND_FILE" << EOF
 TYPE=${proto}
 HOST=${p_host}
@@ -765,13 +879,63 @@ PASS=${p_pass}
 ROUTE_MODE=${r_m}
 EOF
         chmod 600 "$OUTBOUND_FILE"
-        log "外置代理出口配置已保存"
+        log "${proto^^} 出口配置已保存，正在重启服务生效..."
+        do_restart
+        press_any_key
+      fi
+      ;;
+    3)
+      read -p "TURN 服务器地址: " t_host
+      read -p "TURN 服务器端口 [默认 3478]: " t_port
+      t_port="${t_port:-3478}"
+      read -p "用户名 (留空无认证): " t_user
+      local t_pass=""
+      [ -n "$t_user" ] && read -p "密码: " t_pass
+      read -p "本地 SOCKS5 转接端口 [默认 10808]: " t_lport
+      t_lport="${t_lport:-10808}"
+      if [ -n "$t_host" ]; then
+        local r_m
+        r_m="$(prompt_route_mode)"
+        cat > "$OUTBOUND_FILE" << EOF
+TYPE=turn
+HOST=${t_host}
+PORT=${t_port}
+USER=${t_user}
+PASS=${t_pass}
+LOCAL_PORT=${t_lport}
+ROUTE_MODE=${r_m}
+EOF
+        chmod 600 "$OUTBOUND_FILE"
+        log "TURN 出口配置已保存，正在启动 turn2socks 并重启服务..."
+        start_turn2socks
         do_restart
         press_any_key
       fi
       ;;
     4)
+      setup_warp_outbound
+      ;;
+    5)
+      if [ ! -f "$OUTBOUND_FILE" ]; then
+        warn "当前未设置任何外置出口，无法切换分流模式"
+      else
+        local new_mode
+        new_mode="$(prompt_route_mode)"
+        if grep -q '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null; then
+          sed -i "s/^ROUTE_MODE=.*/ROUTE_MODE=${new_mode}/" "$OUTBOUND_FILE"
+        else
+          echo "ROUTE_MODE=${new_mode}" >> "$OUTBOUND_FILE"
+        fi
+        local m_desc="智能分流"
+        [ "$new_mode" = "global" ] && m_desc="全局代理"
+        log "分流模式已切换为: ${m_desc}，正在重启服务生效..."
+        do_restart
+      fi
+      press_any_key
+      ;;
+    6)
       rm -f "$OUTBOUND_FILE"
+      stop_turn2socks 2>/dev/null || true
       log "已恢复原生直连出站"
       do_restart
       press_any_key
@@ -936,7 +1100,7 @@ EOF
 EOF
 
   # 处理 Outbound 出口与分流策略
-  local out_type="" out_route_mode="direct"
+  local out_type="" out_route_mode="direct" active_outbound_tag=""
   if [ -f "$OUTBOUND_FILE" ]; then
     out_type="$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
     out_route_mode="$(grep '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
@@ -950,6 +1114,7 @@ EOF
   }
 
   if [ "$out_type" = "warp" ] && [ -f "$WARP_CONF" ]; then
+    active_outbound_tag="warp-out"
     local w_priv w_peer w_v4 w_v6 w_res w_end
     w_priv="$(grep '^PRIV_KEY=' "$WARP_CONF" | cut -d'=' -f2-)"
     w_peer="$(grep '^PEER_PUB_KEY=' "$WARP_CONF" | cut -d'=' -f2-)"
@@ -983,6 +1148,7 @@ EOF
       append_outbound "$warp_block"
     fi
   elif [ "$out_type" = "socks" ] || [ "$out_type" = "http" ]; then
+    active_outbound_tag="proxy-out"
     local p_h p_p p_u p_pass
     p_h="$(grep '^HOST=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
     p_p="$(grep '^PORT=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
@@ -1005,6 +1171,25 @@ EOF
       append_outbound '    { "protocol": "freedom", "tag": "direct" }'
       append_outbound "$proxy_block"
     fi
+  elif [ "$out_type" = "turn" ]; then
+    active_outbound_tag="turn-out"
+    local t_lp
+    t_lp="$(grep '^LOCAL_PORT=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
+    [ -z "$t_lp" ] && t_lp=10808
+    local turn_block='    {
+      "tag": "turn-out",
+      "protocol": "socks",
+      "settings": {
+        "servers": [{ "address": "127.0.0.1", "port": '"$t_lp"' }]
+      }
+    }'
+    if [ "$out_route_mode" = "global" ]; then
+      append_outbound "$turn_block"
+      append_outbound '    { "protocol": "freedom", "tag": "direct" }'
+    else
+      append_outbound '    { "protocol": "freedom", "tag": "direct" }'
+      append_outbound "$turn_block"
+    fi
   else
     append_outbound '    { "protocol": "freedom", "tag": "direct" }'
   fi
@@ -1017,11 +1202,11 @@ EOF
     "rules": [
 EOF
 
-  if [ "$out_type" = "warp" ] && [ "$out_route_mode" = "split" ]; then
+  if [ -n "$active_outbound_tag" ] && [ "$out_route_mode" = "split" ]; then
     cat >> "$CONFIG_FILE" << EOF
       {
         "type": "field",
-        "outboundTag": "warp-out",
+        "outboundTag": "${active_outbound_tag}",
         "domain": [
           "geosite:openai",
           "geosite:netflix",
@@ -1032,11 +1217,11 @@ EOF
         ]
       },
 EOF
-  elif [ "$out_type" = "warp" ] && [ "$out_route_mode" = "global" ]; then
+  elif [ -n "$active_outbound_tag" ] && [ "$out_route_mode" = "global" ]; then
     cat >> "$CONFIG_FILE" << EOF
       {
         "type": "field",
-        "outboundTag": "warp-out",
+        "outboundTag": "${active_outbound_tag}",
         "network": "tcp,udp"
       },
 EOF
@@ -1269,6 +1454,11 @@ do_run() {
   fi
   log "Xray 语法校验通过 (Syntax OK)"
 
+  # 若配置了 TURN 出口，优先拉起 turn2socks 转接守护
+  if [ -f "$OUTBOUND_FILE" ] && [ "$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)" = "turn" ]; then
+    start_turn2socks || true
+  fi
+
   pkill -f "$XRAY_BIN" 2>/dev/null || true
   "$XRAY_BIN" run -config "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
@@ -1329,6 +1519,12 @@ do_run() {
       "$XRAY_BIN" run -config "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
       echo $! > "$PID_FILE"
     fi
+    if [ -f "$OUTBOUND_FILE" ] && [ "$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)" = "turn" ]; then
+      if [ -f "$TURN2SOCKS_PID" ] && ! kill -0 "$(cat "$TURN2SOCKS_PID" 2>/dev/null)" 2>/dev/null; then
+        warn "检测到 turn2socks 转接异常退出，正在自动拉起守护..."
+        start_turn2socks || true
+      fi
+    fi
     sleep 10
   done
 }
@@ -1341,6 +1537,7 @@ do_stop() {
   pkill -f "$XRAY_BIN" 2>/dev/null || true
   pkill -f "$CF_BIN" 2>/dev/null || true
   pkill -f "$KM_BIN" 2>/dev/null || true
+  stop_turn2socks 2>/dev/null || true
   log "Xray 及相关组件已全部停止"
 }
 
@@ -1585,6 +1782,7 @@ do_log() {
   echo -e "${WHITE}1. Xray 核心运行日志${RESET}"
   echo -e "${WHITE}2. Cloudflare Argo 穿透隧道日志${RESET}"
   echo -e "${WHITE}3. Komari 探针监控日志${RESET}"
+  echo -e "${WHITE}4. turn2socks (TURN 转接) 日志${RESET}"
   echo -e "${WHITE}0. 返回上一级菜单${RESET}"
   echo -e "${GREEN}----------------------------------------------------------${RESET}"
   read -p "请选择日志项: " log_c
@@ -1616,6 +1814,16 @@ do_log() {
         tail -n 60 -f "$KM_LOG"
       else
         warn "暂无探针日志文件"
+        press_any_key
+      fi
+      ;;
+    4)
+      clear
+      echo -e "${GREEN}=== turn2socks 转接日志 (Ctrl+C 退出追踪) ===${RESET}"
+      if [ -f "$TURN2SOCKS_LOG" ]; then
+        tail -n 60 -f "$TURN2SOCKS_LOG"
+      else
+        warn "暂无 turn2socks 日志文件"
         press_any_key
       fi
       ;;
