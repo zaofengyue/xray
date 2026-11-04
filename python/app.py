@@ -840,6 +840,28 @@ def main():
     prefer_host = CONF_CF_PREFER_HOST or os.environ.get("CF_PREFER_HOST", CF_PREFER_HOST_CANDIDATES[0])
     links, _ = build_subscription(prefer_host, current_argo_host[0])
 
+    def send_telegram_notice(h: str, cur_links: list):
+        token = (CONF_TG_BOT_TOKEN or os.environ.get("TG_BOT_TOKEN", "")).strip()
+        chat_id = (CONF_TG_CHAT_ID or os.environ.get("TG_CHAT_ID", "")).strip()
+        if not token or not chat_id:
+            return
+        text = (
+            f"🎉 *Xray 节点部署成功通知 (Python)*\n"
+            f"*节点*: `{NODE_NAME}`\n"
+            f"*域名*: `{h}`\n"
+            f"*订阅*: `http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}`"
+        )
+        payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode("utf-8")
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=payload,
+                headers={"Content-Type": "application/json"}
+            )
+            urllib.request.urlopen(req, timeout=5.0)
+        except Exception:
+            pass
+
     def on_ready(h: str):
         current_argo_host[0] = h
         cur_links, _ = build_subscription(prefer_host, h)
@@ -854,6 +876,19 @@ def main():
             for lk in cur_links:
                 print(lk)
             print("============================================================\n")
+
+            clear_min = int(CONF_LOG_CLEAR_MINUTES or os.environ.get("LOG_CLEAR_MINUTES", "2"))
+            if clear_min > 0:
+                def delayed_clear():
+                    time.sleep(clear_min * 60)
+                    try:
+                        os.system("cls" if os.name == "nt" else "clear")
+                        print("[安全自洁] 控制台敏感节点信息已自动清空。")
+                    except Exception:
+                        pass
+                threading.Thread(target=delayed_clear, daemon=True).start()
+
+        send_telegram_notice(h, cur_links)
 
     # 6. 启动 Cloudflared
     if not DISABLE_ARGO:
@@ -893,7 +928,7 @@ def main():
                             nh = m.group(1)
                             if nh != current_argo_host[0]:
                                 current_argo_host[0] = nh
-                                logger.info(f"[Argo] 临时域名已分配: https::{nh}")
+                                logger.info(f"[Argo] 临时域名已分配: https://{nh}")
                                 on_ready(nh)
                     proc.wait()
                     time.sleep(3.0)
