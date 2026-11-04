@@ -618,19 +618,19 @@ apply_domain_to_all_protos() {
 menu_domain_cert() {
   while true; do
     clear
-    echo -e "${GREEN}==================== 域名证书 (acme.sh) ====================${RESET}"
+    echo -e "${GREEN}==================== 域名证书管理 ====================${RESET}"
     local certs _s_dom
     certs="$(_list_domain_certs)"
     _s_dom="$(get_val SERVER_DOMAIN)"
-    echo -e "${GRAY}已签发/导入证书:${RESET} ${CYAN}${certs:-暂无}${RESET}"
-    echo -e "${GRAY}当前连接域名:${RESET}   ${CYAN}${_s_dom:-使用公网IP直连}${RESET}"
-    echo -e "${GREEN}------------------------------------------------------------${RESET}"
-    echo -e "${WHITE}1. 申请 Let's Encrypt 证书 (需 80 端口可用且已解析)${RESET}"
-    echo -e "${WHITE}2. 导入外部已有证书 (cert.pem + key.pem)${RESET}"
-    echo -e "${WHITE}3. 强制续期指定域名证书${RESET}"
-    echo -e "${WHITE}4. 删除已存域名证书${RESET}"
-    echo -e "${WHITE}0. 返回上一级菜单${RESET}"
-    echo -e "${GREEN}------------------------------------------------------------${RESET}"
+    echo -e "${GRAY}已签发证书:${RESET} ${CYAN}${certs:-暂无}${RESET}"
+    echo -e "${GRAY}当前域名:  ${RESET} ${CYAN}${_s_dom:-使用公网 IP 直连}${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    echo -e "${WHITE} 1. 申请 ACME 证书${RESET}"
+    echo -e "${WHITE} 2. 导入外部证书${RESET}"
+    echo -e "${WHITE} 3. 强制续期证书${RESET}"
+    echo -e "${WHITE} 4. 删除域名证书${RESET}"
+    echo -e "${WHITE} 0. 返回面板${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
     read -p "请输入选项: " c_opt
     case "$c_opt" in
       1)
@@ -829,7 +829,7 @@ prompt_route_mode() {
 
 menu_outbound() {
   clear
-  echo -e "${GREEN}==================== 出口设置与落地分流 ====================${RESET}"
+  echo -e "${GREEN}================ 出口设置与落地分流 ================${RESET}"
   local cur_type="direct" cur_mode="直连" cur_addr="" cur_port=""
   if [ -f "$OUTBOUND_FILE" ]; then
     cur_type="$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
@@ -837,25 +837,25 @@ menu_outbound() {
     cur_port="$(grep '^PORT=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
     local r_m
     r_m="$(grep '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
-    [ "$r_m" = "split" ] && cur_mode="智能分流 (AI/流媒体解锁)"
-    [ "$r_m" = "global" ] && cur_mode="全局代理 (全走出口)"
+    [ "$r_m" = "split" ] && cur_mode="智能分流"
+    [ "$r_m" = "global" ] && cur_mode="全局代理"
   fi
   if [ "$cur_type" = "direct" ]; then
-    echo -e "当前出站模式: ${CYAN}原生直连 (默认)${RESET}"
+    echo -e "当前出站模式: ${CYAN}原生直连${RESET}"
   elif [ "$cur_type" = "warp" ]; then
-    echo -e "当前出站模式: ${CYAN}Cloudflare WARP (WireGuard)${RESET} [模式: ${GREEN}${cur_mode}${RESET}]"
+    echo -e "当前出站模式: ${CYAN}WARP 原生出口${RESET} [模式: ${GREEN}${cur_mode}${RESET}]"
   else
     echo -e "当前出站模式: ${CYAN}${cur_type}${RESET} -> ${CYAN}${cur_addr}:${cur_port}${RESET} [模式: ${GREEN}${cur_mode}${RESET}]"
   fi
-  echo -e "${GREEN}------------------------------------------------------------${RESET}"
-  echo -e "${WHITE}1. 设置 SOCKS5 出口代理${RESET}"
-  echo -e "${WHITE}2. 设置 HTTP 出口代理${RESET}"
-  echo -e "${WHITE}3. 设置 TURN 穿透出口 (基于 turn2socks 转接)${RESET}"
-  echo -e "${WHITE}4. 设置 Cloudflare WARP 原生出口 (WireGuard 解锁 AI/流媒体)${RESET}"
-  echo -e "${WHITE}5. 切换分流模式 (智能分流 / 全局代理)${RESET}"
-  echo -e "${WHITE}6. 恢复原生直连出口 (清除全部外置出站)${RESET}"
-  echo -e "${WHITE}0. 返回上一级菜单${RESET}"
-  echo -e "${GREEN}------------------------------------------------------------${RESET}"
+  echo -e "${GREEN}----------------------------------------------------${RESET}"
+  echo -e "${WHITE} 1. 设置 Socks5 出口${RESET}"
+  echo -e "${WHITE} 2. 设置 HTTP 出口${RESET}"
+  echo -e "${WHITE} 3. 设置 TURN 出口${RESET}"
+  echo -e "${WHITE} 4. 设置 WARP 出口${RESET}"
+  echo -e "${WHITE} 5. 分流模式${RESET}"
+  echo -e "${WHITE} 6. 恢复直连${RESET}"
+  echo -e "${WHITE} 0. 返回面板${RESET}"
+  echo -e "${GREEN}----------------------------------------------------${RESET}"
   read -p "请输入选项 [0-6]: " o_opt
   case "$o_opt" in
     1|2)
@@ -1626,13 +1626,13 @@ menu_update() {
   local cur_xray="未安装"
   [ -x "$XRAY_BIN" ] && cur_xray="$("$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}')"
   echo -e "当前 Xray 核心版本: ${CYAN}${cur_xray}${RESET}"
-  echo -e "${GREEN}------------------------------------------------------${RESET}"
-  echo -e "${WHITE}1. 升级 Xray-core 至 GitHub 官方最新稳定版${RESET}"
-  echo -e "${WHITE}2. 升级 Cloudflared (Argo) 穿透引擎${RESET}"
-  echo -e "${WHITE}3. 升级 Komari-agent 探针${RESET}"
-  echo -e "${WHITE}4. 更新 xray.sh 本管理脚本${RESET}"
-  echo -e "${WHITE}0. 返回上一级菜单${RESET}"
-  echo -e "${GREEN}------------------------------------------------------${RESET}"
+  echo -e "${GREEN}----------------------------------------------------${RESET}"
+  echo -e "${WHITE} 1. 升级 Xray 核心${RESET}"
+  echo -e "${WHITE} 2. 升级 Argo 引擎${RESET}"
+  echo -e "${WHITE} 3. 升级 Komari 探针${RESET}"
+  echo -e "${WHITE} 4. 更新管理脚本${RESET}"
+  echo -e "${WHITE} 0. 返回面板${RESET}"
+  echo -e "${GREEN}----------------------------------------------------${RESET}"
   read -p "请输入选项: " u_opt
   case "$u_opt" in
     1)
@@ -1686,7 +1686,7 @@ do_install() {
     in_reality_port="$(get_free_port 443)"
     in_ss_port="$(get_free_port 8388)"
     in_s5_port="$(get_free_port 1080)"
-    in_trojan_port=""
+    in_trojan_port="$(get_free_port 2087)"
     in_disable_argo="false"
     in_argo_domain=""
     in_argo_auth=""
@@ -1720,10 +1720,11 @@ do_install() {
     echo ""
     echo -e "${YELLOW}--- 直连协议端口分配 (留空则不开启) ---${RESET}"
     rm -f "$USED_PORTS_FILE"
-    local rec_r rec_ss rec_s5
+    local rec_r rec_ss rec_s5 rec_tr
     rec_r="$(get_free_port 443)"
     rec_ss="$(get_free_port 8388)"
     rec_s5="$(get_free_port 1080)"
+    rec_tr="$(get_free_port 2087)"
 
     read -p "VLESS-Reality 端口 [推荐 ${rec_r}，留空关闭]: " in_reality_port
     if [ -n "$in_reality_port" ]; then
@@ -1738,7 +1739,7 @@ do_install() {
     fi
 
     read -p "SOCKS5 端口 [推荐 ${rec_s5}，留空关闭]: " in_s5_port
-    read -p "Trojan-TCP 端口 [留空关闭]: " in_trojan_port
+    read -p "Trojan-TCP 端口 [推荐 ${rec_tr}，留空关闭]: " in_trojan_port
   fi
 
   # 保存配置
@@ -1778,14 +1779,14 @@ do_install() {
 # ── 18. 日志查看器 (do_log) ──────────────────────────────────────────────────
 do_log() {
   clear
-  echo -e "${GREEN}==================== 实时运行日志查看 ====================${RESET}"
-  echo -e "${WHITE}1. Xray 核心运行日志${RESET}"
-  echo -e "${WHITE}2. Cloudflare Argo 穿透隧道日志${RESET}"
-  echo -e "${WHITE}3. Komari 探针监控日志${RESET}"
-  echo -e "${WHITE}4. turn2socks (TURN 转接) 日志${RESET}"
-  echo -e "${WHITE}0. 返回上一级菜单${RESET}"
-  echo -e "${GREEN}----------------------------------------------------------${RESET}"
-  read -p "请选择日志项: " log_c
+  echo -e "${GREEN}================ 实时运行日志追踪 ================${RESET}"
+  echo -e "${WHITE} 1. Xray 核心运行日志${RESET}"
+  echo -e "${WHITE} 2. Argo 隧道穿透日志${RESET}"
+  echo -e "${WHITE} 3. Komari 探针监控日志${RESET}"
+  echo -e "${WHITE} 4. turn2socks 转接日志${RESET}"
+  echo -e "${WHITE} 0. 返回面板${RESET}"
+  echo -e "${GREEN}----------------------------------------------------${RESET}"
+  read -p "请输入选项 [0-4]: " log_c
   case "$log_c" in
     1)
       clear
@@ -1835,33 +1836,20 @@ do_log() {
 show_sub() {
   while true; do
     clear
-    echo -e "${GREEN}==================== 节点订阅与客户端配置 ====================${RESET}"
+    echo -e "${GREEN}================ 节点订阅与配置导出 ================${RESET}"
     if [ ! -f "$SUB_FILE" ]; then
       warn "尚未生成订阅文件，请先启动 Xray 服务"
       press_any_key
       return
     fi
 
-    echo -e "${GRAY}已激活协议矩阵:${RESET}"
-    [ -n "$(get_val REALITY_PORT)" ] && echo -e "  ${GREEN}✓ VLESS-Reality${RESET} (Vision 极速流控, 端口: $(get_val REALITY_PORT))"
-    [ -n "$(get_val SS_PORT)" ]      && echo -e "  ${GREEN}✓ Shadowsocks 2022${RESET} (blake3-aes-128-gcm, 端口: $(get_val SS_PORT))"
-    [ -n "$(get_val S5_PORT)" ]      && echo -e "  ${GREEN}✓ Socks5${RESET} (端口: $(get_val S5_PORT))"
-    [ -n "$(get_val TROJAN_PORT)" ]  && echo -e "  ${GREEN}✓ Trojan-TCP${RESET} (端口: $(get_val TROJAN_PORT))"
-    if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
-      echo -e "  ${GREEN}✓ VLESS-xhttp${RESET} (Argo SplitHTTP 现代流传输)"
-      echo -e "  ${GREEN}✓ VLESS-WS${RESET}   (Argo WebSocket CDN 穿透)"
-      echo -e "  ${GREEN}✓ VMess-WS${RESET}   (Argo WebSocket CDN 穿透)"
-      echo -e "  ${GREEN}✓ Trojan-WS${RESET}  (Argo WebSocket CDN 穿透)"
-    fi
-
-    echo -e "${GREEN}--------------------------------------------------------------${RESET}"
-    echo -e "${WHITE}1. 查看明文节点链接清单 (直连 & Argo)${RESET}"
-    echo -e "${WHITE}2. 查看 Base64 订阅文本 (兼容 V2rayN / Shadowrocket)${RESET}"
-    echo -e "${WHITE}3. 查看 Clash Meta (Mihomo) 完整规则配置 YAML${RESET}"
-    echo -e "${WHITE}4. 保存全部订阅配置至文本文件${RESET}"
-    echo -e "${WHITE}0. 返回主菜单${RESET}"
-    echo -e "${GREEN}--------------------------------------------------------------${RESET}"
-    read -p "请输入选项: " s_opt
+    echo -e "${WHITE} 1. 查看明文节点链接${RESET}"
+    echo -e "${WHITE} 2. 查看 Base64 订阅文本${RESET}"
+    echo -e "${WHITE} 3. 查看 Clash Meta 规则配置${RESET}"
+    echo -e "${WHITE} 4. 导出配置至本地文本文件${RESET}"
+    echo -e "${WHITE} 0. 返回面板${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    read -p "请输入选项 [0-4]: " s_opt
     case "$s_opt" in
       1)
         clear
@@ -1902,60 +1890,76 @@ show_sub() {
 
 # ── 20. 参数与协议精细化管理菜单 (menu_config) ────────────────────────────────
 menu_config() {
+  local config_modified=0
   while true; do
     clear
-    echo -e "${GREEN}==================== 详细参数与协议管理 ====================${RESET}"
-    echo -e "${WHITE}1. 用户 UUID:        ${CYAN}$(get_val UUID)${RESET}"
-    echo -e "${WHITE}2. VLESS-Reality:   ${CYAN}端口: $(get_val REALITY_PORT:-未启用) | 伪装站点: $(get_val REALITY_DOMAIN:-www.iij.ad.jp)${RESET}"
-    echo -e "${WHITE}3. Shadowsocks 2022: ${CYAN}端口: $(get_val SS_PORT:-未启用)${RESET}"
-    echo -e "${WHITE}4. Socks5 协议:      ${CYAN}端口: $(get_val S5_PORT:-未启用)${RESET}"
-    echo -e "${WHITE}5. Trojan-TCP:       ${CYAN}端口: $(get_val TROJAN_PORT:-未启用)${RESET}"
-    echo -e "${WHITE}6. Argo 穿透隧道:    ${CYAN}域名: $(get_val ARGO_DOMAIN:-临时隧道) | 优选: $(get_val CF_PREFER_HOST:-www.visa.com.tw)${RESET}"
-    echo -e "${WHITE}7. Komari 探针监控:  ${CYAN}$(get_val KOMARI_DOMAIN:-未配置)${RESET}"
-    echo -e "${WHITE}8. 全局连接 IP/域名: ${CYAN}$(get_val SERVER_DOMAIN:-$(get_public_ip))${RESET}"
-    echo -e "${WHITE}0. 保存并应用重启${RESET}"
-    echo -e "${GREEN}------------------------------------------------------------${RESET}"
-    read -p "请选择修改项: " c_opt
+    local argo_st="临时隧道"
+    if [ "$(get_val DISABLE_ARGO)" = "true" ]; then
+      argo_st="已禁用"
+    elif [ -n "$(get_val ARGO_DOMAIN)" ]; then
+      argo_st="$(get_val ARGO_DOMAIN)"
+    fi
+
+    echo -e "${GREEN}====================================================${RESET}"
+    echo -e "${WHITE}                    修改参数配置                    ${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    echo -e "${WHITE} 1. 用户 UUID           : ${CYAN}$(get_val UUID)${RESET}"
+    echo -e "${WHITE} 2. Reality 端口        : ${CYAN}$(get_val REALITY_PORT:-未启用)${RESET} | Reality 域名: ${CYAN}$(get_val REALITY_DOMAIN:-www.iij.ad.jp)${RESET}"
+    echo -e "${WHITE} 3. Shadowsocks 端口    : ${CYAN}$(get_val SS_PORT:-未启用)${RESET}"
+    echo -e "${WHITE} 4. SOCKS5 协议端口     : ${CYAN}$(get_val S5_PORT:-未启用)${RESET}"
+    echo -e "${WHITE} 5. Trojan 协议端口     : ${CYAN}$(get_val TROJAN_PORT:-未启用)${RESET}"
+    echo -e "${WHITE} 6. Argo 隧道管理       : ${CYAN}${argo_st}${RESET}"
+    echo -e "${WHITE} 7. CDN 优选域名        : ${CYAN}$(get_val CF_PREFER_HOST:-www.visa.com.tw)${RESET}"
+    echo -e "${WHITE} 8. Komari 探针         : ${CYAN}$(get_val KOMARI_DOMAIN:-未配置)${RESET}"
+    echo -e "${WHITE} 9. 全局连接地址        : ${CYAN}$(get_val SERVER_DOMAIN:-自动探测)${RESET}"
+    echo -e "${WHITE} 0. 返回面板${RESET}"
+    echo -e "${GREEN}====================================================${RESET}"
+    read -p "请输入修改项 [0-9]: " c_opt
     case "$c_opt" in
       1)
         read -p "请输入新 UUID [留空自动生成]: " new_u
         [ -z "$new_u" ] && new_u="$(get_uuid)"
         set_val UUID "$new_u"
         echo "$new_u" > "$UUID_FILE"
+        config_modified=1
         log "UUID 已更新"
         sleep 1
         ;;
       2)
-        read -p "VLESS-Reality 端口 [留空关闭]: " new_rp
+        read -p "Reality 端口 [留空关闭]: " new_rp
         set_val REALITY_PORT "$new_rp"
         if [ -n "$new_rp" ]; then
           read -p "Reality 伪装域名 [默认 www.iij.ad.jp]: " new_rd
           set_val REALITY_DOMAIN "${new_rd:-www.iij.ad.jp}"
           rm -f "$REALITY_KEY_FILE"
         fi
+        config_modified=1
         log "Reality 配置已更新"
         sleep 1
         ;;
       3)
-        read -p "Shadowsocks 2022 端口 [留空关闭]: " new_sp
+        read -p "Shadowsocks 端口 [留空关闭]: " new_sp
         set_val SS_PORT "$new_sp"
         if [ -n "$new_sp" ]; then
           read -p "Shadowsocks 密码 [留空随机生成]: " new_pass
           [ -z "$new_pass" ] && new_pass="$(openssl rand -base64 16 2>/dev/null || echo "WnJ5UGFzc3dvcmQxMjM0")"
           set_val SS_PASS "$new_pass"
         fi
-        log "Shadowsocks 2022 配置已更新"
+        config_modified=1
+        log "Shadowsocks 配置已更新"
         sleep 1
         ;;
       4)
-        read -p "Socks5 端口 [留空关闭]: " new_s5
+        read -p "SOCKS5 协议端口 [留空关闭]: " new_s5
         set_val S5_PORT "$new_s5"
-        log "Socks5 配置已更新"
+        config_modified=1
+        log "SOCKS5 配置已更新"
         sleep 1
         ;;
       5)
-        read -p "Trojan-TCP 端口 [留空关闭]: " new_tp
+        read -p "Trojan 协议端口 [留空关闭]: " new_tp
         set_val TROJAN_PORT "$new_tp"
+        config_modified=1
         log "Trojan 配置已更新"
         sleep 1
         ;;
@@ -1968,41 +1972,103 @@ menu_config() {
             read -p "Argo 固定域名 [留空使用临时隧道]: " new_ad
             set_val ARGO_DOMAIN "$new_ad"
             if [ -n "$new_ad" ]; then
-              read -p "Argo Token: " new_at
+              read -p "Argo Tunnel Token: " new_at
               set_val ARGO_AUTH "$new_at"
             fi
-            read -p "Cloudflare 优选域名/IP [默认 www.visa.com.tw]: " new_pref
-            set_val CF_PREFER_HOST "${new_pref:-www.visa.com.tw}"
             ;;
         esac
+        config_modified=1
         log "Argo 隧道设置已更新"
         sleep 1
         ;;
       7)
+        read -p "Cloudflare CDN 优选域名/IP [默认 www.visa.com.tw]: " new_pref
+        set_val CF_PREFER_HOST "${new_pref:-www.visa.com.tw}"
+        config_modified=1
+        log "CDN 优选域名已更新"
+        sleep 1
+        ;;
+      8)
         read -p "Komari 服务端域名 [留空关闭]: " new_kd
         set_val KOMARI_DOMAIN "$new_kd"
         if [ -n "$new_kd" ]; then
           read -p "Komari 探针 Token: " new_kt
           set_val KOMARI_TOKEN "$new_kt"
         fi
+        config_modified=1
         log "Komari 探针配置已更新"
         sleep 1
         ;;
-      8)
+      9)
         read -p "自定义连接域名/IP [留空恢复自动探测]: " new_dom
         set_val SERVER_DOMAIN "$new_dom"
-        log "连接域名已更新"
+        config_modified=1
+        log "连接地址已更新"
         sleep 1
         ;;
       0)
-        do_restart
+        if [ "$config_modified" = "1" ]; then
+          log "配置已变更，正在平滑重启服务生效..."
+          do_restart
+        else
+          log "未作任何更改，直接返回面板"
+        fi
         return
         ;;
     esac
   done
 }
 
-# ── 21. 主交互式运维控制面板 (do_menu) ─────────────────────────────────────────
+# ── 21. 服务生命周期管理 (menu_service) ──────────────────────────────────────────
+menu_service() {
+  while true; do
+    clear
+    local st_desc="${RED}● 未运行${RESET}"
+    local x_pid=""
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+      x_pid="$(cat "$PID_FILE")"
+      st_desc="${GREEN}● 运行中 (PID: ${x_pid})${RESET}"
+    elif pgrep -f "$XRAY_BIN" >/dev/null 2>&1; then
+      st_desc="${GREEN}● 运行中${RESET}"
+    fi
+    echo -e "${GREEN}==================== Xray 服务管理 ====================${RESET}"
+    echo -e "当前运行状态: ${st_desc}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    echo -e "${WHITE} 1. 启动服务${RESET}"
+    echo -e "${WHITE} 2. 停止服务${RESET}"
+    echo -e "${WHITE} 3. 重启服务${RESET}"
+    echo -e "${WHITE} 0. 返回面板${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    read -p "请输入选项 [0-3]: " s_opt
+    case "$s_opt" in
+      1)
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
+          systemctl start "$SVC_NAME"
+        else
+          nohup "$0" run >/dev/null 2>&1 &
+        fi
+        log "服务已发起启动"
+        sleep 2
+        ;;
+      2)
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
+          systemctl stop "$SVC_NAME"
+        else
+          do_stop
+        fi
+        log "服务已停止"
+        sleep 1
+        ;;
+      3)
+        do_restart
+        sleep 2
+        ;;
+      0) return ;;
+    esac
+  done
+}
+
+# ── 22. 主交互式运维控制面板 (do_menu) ─────────────────────────────────────────
 do_menu() {
   while true; do
     clear
@@ -2020,59 +2086,33 @@ do_menu() {
     local pub_ip
     pub_ip="$(get_public_ip)"
 
-    echo -e "${GREEN}================================================================${RESET}"
-    echo -e "${WHITE}          Xray 跨平台 VPS 一体化智能管理运维系统          ${RESET}"
+    echo -e "${GREEN}====================================================${RESET}"
+    echo -e "${WHITE}               Xray 综合管理控制面板               ${RESET}"
     echo -e "${GRAY}系统状态: ${st_desc} | 核心版本: ${CYAN}${x_ver}${RESET}"
     echo -e "${GRAY}公网 IP:  ${CYAN}${pub_ip}${RESET} | 目录: ${GRAY}${APP_DIR}${RESET}"
-    echo -e "${GREEN}================================================================${RESET}"
-    echo -e "${WHITE} 1. 查看节点订阅 (Base64 / 明文链接 / Clash Meta / JSON 导出)${RESET}"
-    echo -e "${WHITE} 2. 启动 Xray 代理服务${RESET}"
-    echo -e "${WHITE} 3. 停止 Xray 代理服务${RESET}"
-    echo -e "${WHITE} 4. 重启 Xray 代理服务${RESET}"
-    echo -e "${GREEN}----------------------------------------------------------------${RESET}"
-    echo -e "${WHITE} 5. 交互式重新安装 / 初始化向导${RESET}"
-    echo -e "${WHITE} 6. 修改配置 (UUID / Reality / Shadowsocks / Socks5 / 端口)${RESET}"
-    echo -e "${WHITE} 7. 出口设置 (Cloudflare WARP 原生出口 / 智能解锁流媒体与AI)${RESET}"
-    echo -e "${WHITE} 8. 域名证书 (acme.sh 自动申请 / 证书导入 / 协议绑定)${RESET}"
-    echo -e "${WHITE} 9. 查看运行日志 (Xray 核心 / Argo 隧道 / 探针日志)${RESET}"
-    echo -e "${GREEN}----------------------------------------------------------------${RESET}"
-    echo -e "${WHITE}10. 在线升级组件 (Xray 核心升级 / Cloudflared / 脚本自更新)${RESET}"
-    echo -e "${WHITE}11. 彻底卸载清理 Xray 与全部环境数据${RESET}"
-    echo -e "${WHITE} 0. 退出管理控制面板${RESET}"
-    echo -e "${GREEN}================================================================${RESET}"
-    read -p "请输入操作指令编号 [0-11]: " opt
+    echo -e "${GREEN}====================================================${RESET}"
+    echo -e "${WHITE} 1. 查看节点${RESET}"
+    echo -e "${WHITE} 2. 查看日志${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    echo -e "${WHITE} 3. Xray 管理${RESET}"
+    echo -e "${WHITE} 4. Xray 更新${RESET}"
+    echo -e "${WHITE} 5. Xray 卸载${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    echo -e "${WHITE} 6. 修改配置${RESET}"
+    echo -e "${WHITE} 7. 设置出口${RESET}"
+    echo -e "${WHITE} 8. 域名证书${RESET}"
+    echo -e "${WHITE} 9. 更新面板${RESET}"
+    echo -e "${GREEN}----------------------------------------------------${RESET}"
+    echo -e "${WHITE} 0. 退出面板${RESET}"
+    echo -e "${GREEN}====================================================${RESET}"
+    read -p "请输入选项 [0-9]: " opt
     case "$opt" in
       1) show_sub ;;
-      2)
-        if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
-          systemctl start "$SVC_NAME"
-        else
-          nohup "$0" run >/dev/null 2>&1 &
-        fi
-        log "服务已发起启动"
-        sleep 2
-        ;;
-      3)
-        if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
-          systemctl stop "$SVC_NAME"
-        else
-          do_stop
-        fi
-        log "服务已停止"
-        sleep 1
-        ;;
-      4)
-        do_restart
-        sleep 2
-        ;;
-      5) do_install ;;
-      6) menu_config ;;
-      7) menu_outbound ;;
-      8) menu_domain_cert ;;
-      9) do_log ;;
-      10) menu_update ;;
-      11)
-        read -p "确定要彻底删除该项目与所有数据吗? [y/N]: " confirm
+      2) do_log ;;
+      3) menu_service ;;
+      4) menu_update ;;
+      5)
+        read -p "确定要彻底卸载 Xray 与全部数据吗? [y/N]: " confirm
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
           do_stop
           systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
@@ -2082,8 +2122,11 @@ do_menu() {
           exit 0
         fi
         ;;
+      6) menu_config ;;
+      7) menu_outbound ;;
+      8) menu_domain_cert ;;
+      9) do_install ;;
       0) exit 0 ;;
-      *) ;;
     esac
   done
 }
