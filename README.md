@@ -18,10 +18,17 @@
      - `GET /sub` ──▶ 动态生成全协议 Base64 订阅；
      - `Upgrade: websocket` ──▶ 精准分流至 VLESS-WS、VMess-WS、Trojan-WS；
      - `POST /vless-xhttp` ──▶ 原生反代至 Xray SplitHTTP 流通道。
-5. **0 阻塞秒级冷启动**：
-   - 地理位置与公网 IP 采用并发异步后台探测，服务启动耗时从 12 秒压缩至 0.5 秒。
-6. **多端同构支持**：
-   - 完整提供 **Node.js 运行端**、**纯 Python 运行端**、**Linux 一键面板 (xray.sh)** 以及 **多架构 Docker 容器**。
+5. **Cloudflare WARP 原生 WireGuard 出口分流**：
+   - 自动注册 Cloudflare WARP 凭据，通过 Xray 原生 `wireguard` outbound 协议挂载；
+   - 支持**智能分流模式**（仅将 OpenAI、Netflix、Disney+、Gemini 等 AI/流媒体流量路由至 WARP 解锁，其余直连，零损耗）与**全局伪装模式**。
+6. **acme.sh 自动化域名证书体系**：
+   - 内置真实 SSL 证书申请向导，支持 Let's Encrypt 证书签发、Cron 计划任务每日自动续签，一键绑定至直连 TLS / Trojan 协议。
+7. **全客户端格式订阅导出**：
+   - 除了标准 Base64 与明文 URL 外，原生自动生成 **Clash Meta (Mihomo) 完整配置 YAML** 以及 **Xray 客户端专用配置 JSON**。
+8. **0 阻塞秒级冷启动与纯 IPv6 VPS 容灾**：
+   - 内置 NAT64/DNS64 动态递归注入，解决纯 IPv6 小鸡无法访问 GitHub 的顽疾；地理位置并发探测，冷启动提速 90% 以上。
+9. **多端同构支持**：
+   - 完整提供 **Node.js 运行端**、**纯 Python 运行端**、**Linux 旗舰一体化面板 (xray.sh)** 以及 **多架构 Docker 容器**。
 
 ---
 
