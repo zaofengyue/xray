@@ -1,0 +1,3 @@
+# py-xray single-file deployment
+# Zero external pip dependencies required (all modules built into Python 3.8+ stdlib).
+certifi>=2024.2.2

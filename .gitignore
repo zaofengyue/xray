@@ -1,0 +1,15 @@
+node_modules/
+sub.txt
+config.env
+*.log
+*.pid
+.env*
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.xray-core/
+bin/
+state/
+CODE_AUDIT_REPORT.md
+CHANGELOG.md
