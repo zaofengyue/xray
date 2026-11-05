@@ -309,10 +309,11 @@ detect_cf_arch() {
 
 detect_km_arch() {
   case "$(uname -m)" in
-    x86_64|amd64)   echo "linux_amd64" ;;
-    aarch64|arm64)  echo "linux_arm64" ;;
-    armv7l|armhf)   echo "linux_armv7" ;;
-    *)              echo "linux_amd64" ;;
+    x86_64|amd64)     echo "linux-amd64" ;;
+    aarch64|arm64)    echo "linux-arm64" ;;
+    armv7*|armhf|arm) echo "linux-arm" ;;
+    i386|i686)        echo "linux-386" ;;
+    *)                echo "linux-amd64" ;;
   esac
 }
 
@@ -500,7 +501,7 @@ download_komari() {
   log "正在下载 komari-agent (探针)..."
   local kmarch url
   kmarch="$(detect_km_arch)"
-  url="https://github.com/komari-monitoring/komari-agent/releases/latest/download/komari-agent_${kmarch}"
+  url="https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-${kmarch}"
 
   local work tmp_km
   work="$(mktemp -d "$APP_DIR/.dl.XXXXXX" 2>/dev/null || echo "$APP_DIR/.dl_$$")"
@@ -975,6 +976,18 @@ get_node_name_prefix() {
     return
   fi
 
+  # 若近期（10 分钟内）已探测失败过，直接返回兜底名，避免每次重绘菜单因网络阻塞卡顿
+  local fail_file="$STATE_DIR/.geoip_fail"
+  if [ -f "$fail_file" ]; then
+    local last_fail now
+    last_fail="$(cat "$fail_file" 2>/dev/null || echo 0)"
+    now="$(date +%s 2>/dev/null || echo 0)"
+    if [ $((now - last_fail)) -lt 600 ]; then
+      echo "xr-Node"
+      return
+    fi
+  fi
+
   local nat64_was_on=0
   if [ "$(id -u)" = "0" ] && [ ! -f /etc/resolv.conf.xray-orig ]; then
     nat64_enable_temp
@@ -1030,11 +1043,14 @@ get_node_name_prefix() {
   if [ -n "$country" ] && [ -n "$org" ]; then
     name_tag="${country}-${org}"
     set_val NAME "$name_tag"
+    rm -f "$fail_file" 2>/dev/null || true
   elif [ -n "$country" ]; then
     name_tag="${country}-Node"
     set_val NAME "$name_tag"
+    rm -f "$fail_file" 2>/dev/null || true
   else
     name_tag="xr-Node"
+    date +%s > "$fail_file" 2>/dev/null || true
   fi
   echo "$name_tag"
 }
@@ -1050,6 +1066,10 @@ format_addr() {
 
 b64() {
   printf '%s' "$1" | base64 | tr -d '\r\n'
+}
+
+b64_urlsafe() {
+  printf '%s' "$1" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '='
 }
 
 press_any_key() {
@@ -1133,6 +1153,16 @@ get_ss2022_key() {
     fi
   fi
   printf '%s' "$key" | tr -d '\r\n'
+}
+
+get_ss_pass() {
+  local k
+  k="$(get_val SS_PASS)"
+  if [ -z "$k" ]; then
+    k="$(get_ss2022_key "")"
+    set_val SS_PASS "$k"
+  fi
+  echo "$k"
 }
 
 get_socks5_creds() {
@@ -1265,10 +1295,17 @@ menu_domain_cert() {
         read -p "请输入解析到本机的域名 (如 vps.example.com): " domain
         domain="$(echo "$domain" | tr -d '[:space:]')"
         validate_domain_name "$domain" || { warn "域名格式非法，包含非法字符"; press_any_key; continue; }
+        if port_in_use_os 80; then
+          warn "检测到 80 端口已被其他进程占用 (如 Nginx / Apache / Caddy)"
+          warn "Let's Encrypt standalone 模式需要监听 80 端口，请先临时停止占用 80 端口的服务"
+          press_any_key
+          continue
+        fi
+        open_firewall_port 80 tcp
         mkdir -p "$DOMAIN_CERT_DIR/$domain"
         "$ACME_HOME/acme.sh" --home "$ACME_HOME" --register-account -m "admin@${domain}" --server letsencrypt >/dev/null 2>&1 || true
         log "正在向 Let's Encrypt 申请证书..."
-        if "$ACME_HOME/acme.sh" --home "$ACME_HOME" --issue -d "$domain" --standalone --httpport 80 --server letsencrypt --force; then
+        if "$ACME_HOME/acme.sh" --home "$ACME_HOME" --issue -d "$domain" --standalone --httpport 80 --server letsencrypt; then
           "$ACME_HOME/acme.sh" --home "$ACME_HOME" --install-cert -d "$domain" \
             --key-file "$DOMAIN_CERT_DIR/$domain/key.pem" \
             --fullchain-file "$DOMAIN_CERT_DIR/$domain/cert.pem" \
@@ -1631,7 +1668,7 @@ generate_config() {
   reality_sid="$(get_reality_short_id)"
 
   ss_port="$(get_val SS_PORT)"
-  ss_pass="$(get_ss2022_key "$(get_val SS_PASS)")"
+  ss_pass="$(get_ss_pass)"
 
   s5_port="$(get_val S5_PORT)"
   read -r s5_user s5_pass <<< "$(get_socks5_creds)"
@@ -2236,10 +2273,10 @@ generate_sub() {
   # 4. 直连 Shadowsocks 2022
   local ss_port ss_pass
   ss_port="$(get_val SS_PORT)"
-  ss_pass="$(get_val SS_PASS)"
+  ss_pass="$(get_ss_pass)"
   if [ -n "$ss_port" ] && [ -n "$pub_ip" ]; then
     local ss_uinfo
-    ss_uinfo="$(b64 "2022-blake3-aes-128-gcm:${ss_pass}")"
+    ss_uinfo="$(b64_urlsafe "2022-blake3-aes-128-gcm:${ss_pass}")"
     local n_ss="${name}-SS-2022"
     links+=("ss://${ss_uinfo}@${node_host}:${ss_port}#${n_ss}")
     local s_host="${node_host#[}"
@@ -2378,6 +2415,20 @@ EOF
   fi
 }
 
+rotate_log_if_needed() {
+  local log_file="$1"
+  local max_mb="${2:-10}"
+  [ -f "$log_file" ] || return 0
+  local size_bytes
+  size_bytes="$(wc -c < "$log_file" 2>/dev/null || echo 0)"
+  local max_bytes=$((max_mb * 1024 * 1024))
+  if [ "$size_bytes" -gt "$max_bytes" ]; then
+    # 保留最后 2000 行到 .1 备份，并原地截断 (: >)，保持 inode 避免破坏重定向进程的文件句柄
+    tail -n 2000 "$log_file" > "${log_file}.1" 2>/dev/null || true
+    : > "$log_file" 2>/dev/null || true
+  fi
+}
+
 # ── 14. 服务守护、运行与进程调度 ───────────────────────────────────────────────
 do_run() {
   echo $$ > "$RUN_PID"
@@ -2444,25 +2495,29 @@ do_run() {
     fi
   fi
 
-  # 启动 Komari 探针
+  # 启动 Komari 探针 (禁用 Web-SSH/RCE 与自动更新，收紧 root 攻击面)
   local km_dom km_tok
   km_dom="$(get_val KOMARI_DOMAIN)"
   km_tok="$(get_val KOMARI_TOKEN)"
   if [ -n "$km_dom" ] && [ -n "$km_tok" ] && [ -x "$KM_BIN" ]; then
     stop_pid_file "$KM_PID"
-    km_dom="${km_dom#http://}"
-    km_dom="${km_dom#https://}"
+    case "$km_dom" in
+      http://*|https://*) ;;
+      *) km_dom="https://${km_dom}" ;;
+    esac
     local km_conf="$STATE_DIR/komari.json"
     cat > "$km_conf" << EOF
 {
   "endpoint": "${km_dom}",
-  "token": "${km_tok}"
+  "token": "${km_tok}",
+  "disable_web_ssh": true,
+  "disable_auto_update": true
 }
 EOF
     chmod 600 "$km_conf"
-    AGENT_ENDPOINT="$km_dom" AGENT_TOKEN="$km_tok" "$KM_BIN" --config "$km_conf" > "$KM_LOG" 2>&1 &
+    AGENT_ENDPOINT="$km_dom" AGENT_TOKEN="$km_tok" "$KM_BIN" --disable-web-ssh --disable-auto-update --config "$km_conf" > "$KM_LOG" 2>&1 &
     echo $! > "$KM_PID"
-    log "Komari 监控探针已启动"
+    log "Komari 监控探针已启动 (已禁用远程命令执行与自动更新)"
   fi
 
   generate_sub
@@ -2533,20 +2588,30 @@ EOF
         local kd kt
         kd="$(get_val KOMARI_DOMAIN)"
         kt="$(get_val KOMARI_TOKEN)"
-        kd="${kd#http://}"
-        kd="${kd#https://}"
+        case "$kd" in
+          http://*|https://*) ;;
+          *) kd="https://${kd}" ;;
+        esac
         local km_conf="$STATE_DIR/komari.json"
         cat > "$km_conf" << EOF
 {
   "endpoint": "${kd}",
-  "token": "${kt}"
+  "token": "${kt}",
+  "disable_web_ssh": true,
+  "disable_auto_update": true
 }
 EOF
         chmod 600 "$km_conf"
-        AGENT_ENDPOINT="$kd" AGENT_TOKEN="$kt" "$KM_BIN" --config "$km_conf" >> "$KM_LOG" 2>&1 &
+        AGENT_ENDPOINT="$kd" AGENT_TOKEN="$kt" "$KM_BIN" --disable-web-ssh --disable-auto-update --config "$km_conf" >> "$KM_LOG" 2>&1 &
         echo $! > "$KM_PID"
       fi
     fi
+
+    # 日志文件原地滚动截断守护 (单文件限制 10MB)
+    rotate_log_if_needed "$LOG_FILE" 10
+    rotate_log_if_needed "$CF_LOG" 10
+    rotate_log_if_needed "$KM_LOG" 10
+    rotate_log_if_needed "$TURN2SOCKS_LOG" 10
 
     sleep 10
   done
@@ -2692,9 +2757,11 @@ exec /bin/bash \"\$TARGET\" ${subcmd} \"\$@\""
   create_shortcut_bin "xr-sub" "sub"
   create_shortcut_bin "xr-log" "log"
   create_shortcut_bin "xr-del" "del"
+  create_shortcut_bin "xr-rollback" "rollback"
   create_shortcut_bin "xray-sub" "sub"
   create_shortcut_bin "xray-log" "log"
   create_shortcut_bin "xray-del" "del"
+  create_shortcut_bin "xray-rollback" "rollback"
 
   # 3. 环境变量 PATH 安全补充（绝不新建破坏 Debian/Ubuntu 机制的 ~/.bash_profile）
   if [ -f "$HOME_DIR/.bashrc" ] && ! grep -q "/usr/local/bin" "$HOME_DIR/.bashrc" 2>/dev/null; then
@@ -2734,6 +2801,31 @@ do_update_script() {
   press_any_key
 }
 
+do_rollback() {
+  clear
+  echo -e "${GREEN}==================== 回退 xray.sh 管理脚本 ====================${RESET}"
+  local bak_file="$APP_DIR/xray.sh.bak"
+  if [ ! -f "$bak_file" ] || [ ! -s "$bak_file" ]; then
+    warn "未找到有效的脚本备份文件 ($bak_file)，无法回退"
+    press_any_key
+    return 1
+  fi
+
+  log "正在校验备份脚本语法与完整性..."
+  if ! bash -n "$bak_file" >/dev/null 2>&1 || ! grep -q 'do_menu' "$bak_file" 2>/dev/null; then
+    warn "备份脚本语法校验失败或关键函数缺失，终止回退以保护系统"
+    press_any_key
+    return 1
+  fi
+
+  cp -f "$APP_DIR/xray.sh" "$APP_DIR/xray.sh.broken" 2>/dev/null || true
+  cp -f "$bak_file" "$APP_DIR/xray.sh"
+  chmod +x "$APP_DIR/xray.sh"
+  log "管理脚本已成功回退至上一备份版本！正在重新进入管理面板..."
+  sleep 2
+  exec bash "$APP_DIR/xray.sh"
+}
+
 menu_update() {
   clear
   echo -e "${GREEN}==================== 组件在线升级 ====================${RESET}"
@@ -2745,6 +2837,9 @@ menu_update() {
   echo -e "${WHITE} 2. 升级 Argo 引擎${RESET}"
   echo -e "${WHITE} 3. 升级 Komari 探针${RESET}"
   echo -e "${WHITE} 4. 更新管理脚本${RESET}"
+  if [ -f "$APP_DIR/xray.sh.bak" ]; then
+    echo -e "${WHITE} 5. 回退管理脚本 (至上一备份版本)${RESET}"
+  fi
   echo -e "${WHITE} 0. 返回面板${RESET}"
   echo -e "${GREEN}----------------------------------------------------${RESET}"
   read -p "请输入选项: " u_opt
@@ -2765,6 +2860,14 @@ menu_update() {
       press_any_key
       ;;
     4) do_update_script ;;
+    5)
+      if [ -f "$APP_DIR/xray.sh.bak" ]; then
+        do_rollback
+      else
+        warn "无效选项"
+        press_any_key
+      fi
+      ;;
     0) return ;;
   esac
 }
@@ -2775,7 +2878,6 @@ do_install() {
   echo -e "${GREEN}====================================================${RESET}"
   echo -e "${WHITE}               Xray 智能自动化部署向导               ${RESET}"
   echo -e "${GREEN}====================================================${RESET}"
-  do_stop 2>/dev/null || true
   ensure_basic_deps
 
   echo -e "${WHITE}请选择安装模式:${RESET}"
@@ -2883,10 +2985,10 @@ do_install() {
     read -r in_s5_user in_s5_pass <<< "$(get_socks5_creds)"
     if [ -n "$in_s5_port" ]; then
       read -p "SOCKS5 用户名 [默认 ${in_s5_user}]: " custom_s5_u
-      in_s5_user="$(printf '%s' "${custom_s5_u:-$in_s5_user}" | tr -d '[:space:]' | tr -d '\"'"'")"
+      in_s5_user="$(printf '%s' "${custom_s5_u:-$in_s5_user}" | tr -d '[:space:]"' | tr -d "'")"
       read -s -p "SOCKS5 密码 [默认 ${in_s5_pass}]: " custom_s5_p
       echo ""
-      in_s5_pass="$(printf '%s' "${custom_s5_p:-$in_s5_pass}" | tr -d '[:space:]' | tr -d '\"'"'")"
+      in_s5_pass="$(printf '%s' "${custom_s5_p:-$in_s5_pass}" | tr -d '[:space:]"' | tr -d "'")"
     fi
 
     in_trojan_port="$(prompt_port "Trojan-TCP 端口 [填 0 或留空关闭]: " "0" "$chosen_ports")"
@@ -2896,7 +2998,8 @@ do_install() {
       read -s -p "Trojan 密码 [留空自动生成]: " in_trojan_pass
       echo ""
       if [ -n "$in_trojan_pass" ]; then
-        set_val TROJAN_PASS "$(printf '%s' "$in_trojan_pass" | tr -d '[:space:]' | tr -d '\"'"'")"
+        in_trojan_pass="$(printf '%s' "$in_trojan_pass" | tr -d '[:space:]@#/?&:"' | tr -d "'")"
+        set_val TROJAN_PASS "$in_trojan_pass"
       fi
     fi
   fi
@@ -3195,8 +3298,8 @@ menu_config() {
           read -p "Reality 伪装域名 [默认 ${cur_rd}]: " new_rd
           new_rd="${new_rd:-$cur_rd}"
           new_rd="$(printf '%s' "$new_rd" | tr -d '[:space:]')"
-          if [[ "$new_rd" =~ [\"\\\'\<\>\;\&] ]]; then
-            warn "域名格式非法，包含特殊符号"
+          if ! validate_domain_name "$new_rd"; then
+            warn "域名格式非法，包含非法字符"
             press_any_key
             continue
           fi
@@ -3221,6 +3324,9 @@ menu_config() {
           if [ -n "$new_pass" ]; then
             new_pass="$(get_ss2022_key "$new_pass")"
             set_val SS_PASS "$new_pass"
+          else
+            # 若之前未设置过密码（如自定义安装时关闭，后在菜单开启且留空），确保生成并持久化有效密码
+            get_ss_pass >/dev/null
           fi
           open_firewall_port "$new_sp" both
         fi
@@ -3237,11 +3343,11 @@ menu_config() {
           local cur_s5_u cur_s5_p
           read -r cur_s5_u cur_s5_p <<< "$(get_socks5_creds)"
           read -p "SOCKS5 用户名 [默认 ${cur_s5_u}]: " new_s5_u
-          new_s5_u="$(printf '%s' "${new_s5_u:-$cur_s5_u}" | tr -d '[:space:]' | tr -d '\"'"'")"
+          new_s5_u="$(printf '%s' "${new_s5_u:-$cur_s5_u}" | tr -d '[:space:]"' | tr -d "'")"
           set_val S5_USER "$new_s5_u"
           read -s -p "SOCKS5 密码 [默认 ${cur_s5_p}]: " new_s5_p
           echo ""
-          new_s5_p="$(printf '%s' "${new_s5_p:-$cur_s5_p}" | tr -d '[:space:]' | tr -d '\"'"'")"
+          new_s5_p="$(printf '%s' "${new_s5_p:-$cur_s5_p}" | tr -d '[:space:]"' | tr -d "'")"
           set_val S5_PASS "$new_s5_p"
           open_firewall_port "$new_s5" both
         fi
@@ -3261,7 +3367,7 @@ menu_config() {
           read -s -p "Trojan 密码 [留空保持原值/自动生成]: " new_tr_p
           echo ""
           if [ -n "$new_tr_p" ]; then
-            new_tr_p="$(printf '%s' "$new_tr_p" | tr -d '[:space:]' | tr -d '\"'"'")"
+            new_tr_p="$(printf '%s' "$new_tr_p" | tr -d '[:space:]@#/?&:"' | tr -d "'")"
             set_val TROJAN_PASS "$new_tr_p"
           fi
         fi
@@ -3467,7 +3573,7 @@ do_uninstall() {
         [ -n "$p_s5" ]    && close_firewall_port "$p_s5" both
       fi
 
-      local shortcuts=("xr" "xray" "xr-sub" "xr-log" "xr-del" "xray-sub" "xray-log" "xray-del")
+      local shortcuts=("xr" "xray" "xr-sub" "xr-log" "xr-del" "xr-rollback" "xray-sub" "xray-log" "xray-del" "xray-rollback")
       for d in /usr/local/bin /usr/bin; do
         for n in "${shortcuts[@]}"; do
           local target_path="$d/$n"
@@ -3503,7 +3609,7 @@ do_uninstall() {
 setup_shortcuts
 
 case "${1:-}" in
-  run)     do_run ;;
+  run)      do_run ;;
   stop)
     if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
       systemctl stop "$SVC_NAME"
@@ -3512,17 +3618,19 @@ case "${1:-}" in
       do_stop
     fi
     ;;
-  restart) do_restart ;;
-  sub)     show_sub ;;
-  log)     do_log ;;
-  install) do_install ;;
-  update)  menu_update ;;
-  del)     do_uninstall ;;
+  restart)  do_restart ;;
+  sub)      show_sub ;;
+  log)      do_log ;;
+  install)  do_install ;;
+  update)   menu_update ;;
+  rollback) do_rollback ;;
+  del)      do_uninstall ;;
   *)
     case "$(basename "$0")" in
-      xr-sub|xray-sub) show_sub ;;
-      xr-log|xray-log) do_log ;;
-      xr-del|xray-del) do_uninstall ;;
+      xr-sub|xray-sub)           show_sub ;;
+      xr-log|xray-log)           do_log ;;
+      xr-del|xray-del)           do_uninstall ;;
+      xr-rollback|xray-rollback) do_rollback ;;
       *)
         if [ ! -x "$XRAY_BIN" ]; then
           do_install
