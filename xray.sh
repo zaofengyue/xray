@@ -560,6 +560,9 @@ get_node_name_prefix() {
     org="$(curl -sL --max-time 2 https://api.ip.sb/geoip 2>/dev/null | grep -o '"asn_organization":"[^"]*"' | cut -d'"' -f4 | cut -c1-16 | tr ' ' '_')"
   fi
 
+  country="$(echo "$country" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]' | tr -cd 'A-Z')"
+  org="$(echo "$org" | sed -e 's/^AS[0-9]* //' -e 's/,\? *Inc\.*//' -e 's/,\? *LLC\.*//' | cut -c1-16 | tr ' ' '_' | tr -cd 'a-zA-Z0-9_-')"
+
   if [ -n "$country" ] && [ -n "$org" ]; then
     name_tag="${country}-${org}"
   elif [ -n "$country" ]; then
@@ -1352,13 +1355,20 @@ generate_sub() {
   local links=()
   local clash_proxies=()
   local clash_names=()
+  local c_idx=1
+  next_clash_name() {
+    printf "%s %02d" "$name" "$c_idx"
+    c_idx=$((c_idx + 1))
+  }
 
   # 1. Argo 穿透链路
   if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
     # VLESS-xhttp
-    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=auto&sni=${argo_domain}#${name}-VLESS-xhttp")
-    clash_names+=("\"${name}-VLESS-xhttp\"")
-    clash_proxies+=("  - name: \"${name}-VLESS-xhttp\"
+    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=auto&sni=${argo_domain}#${name}")
+    local c_n
+    c_n="$(next_clash_name)"
+    clash_names+=("\"${c_n}\"")
+    clash_proxies+=("  - name: \"${c_n}\"
     type: vless
     server: ${prefer_host}
     port: 443
@@ -1374,9 +1384,10 @@ generate_sub() {
         Host: ${argo_domain}")
 
     # VLESS-WS
-    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=ws&host=${argo_domain}&path=%2Fvless-ws&sni=${argo_domain}#${name}-VLESS-WS")
-    clash_names+=("\"${name}-VLESS-WS\"")
-    clash_proxies+=("  - name: \"${name}-VLESS-WS\"
+    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=ws&host=${argo_domain}&path=%2Fvless-ws&sni=${argo_domain}#${name}")
+    c_n="$(next_clash_name)"
+    clash_names+=("\"${c_n}\"")
+    clash_proxies+=("  - name: \"${c_n}\"
     type: vless
     server: ${prefer_host}
     port: 443
@@ -1392,10 +1403,11 @@ generate_sub() {
 
     # VMess-WS
     local vm_json
-    vm_json="$(printf '{"v":"2","ps":"%s-VMess-WS","add":"%s","port":"443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"/vmess-ws","tls":"tls","sni":"%s"}' "$name" "$prefer_host" "$uuid" "$argo_domain" "$argo_domain")"
+    vm_json="$(printf '{"v":"2","ps":"%s","add":"%s","port":"443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"/vmess-ws","tls":"tls","sni":"%s"}' "$name" "$prefer_host" "$uuid" "$argo_domain" "$argo_domain")"
     links+=("vmess://$(b64 "$vm_json")")
-    clash_names+=("\"${name}-VMess-WS\"")
-    clash_proxies+=("  - name: \"${name}-VMess-WS\"
+    c_n="$(next_clash_name)"
+    clash_names+=("\"${c_n}\"")
+    clash_proxies+=("  - name: \"${c_n}\"
     type: vmess
     server: ${prefer_host}
     port: 443
@@ -1412,9 +1424,10 @@ generate_sub() {
         Host: ${argo_domain}")
 
     # Trojan-WS
-    links+=("trojan://${uuid}@${prefer_host}:443?security=tls&type=ws&host=${argo_domain}&path=%2Ftrojan-ws&sni=${argo_domain}#${name}-Trojan-WS")
-    clash_names+=("\"${name}-Trojan-WS\"")
-    clash_proxies+=("  - name: \"${name}-Trojan-WS\"
+    links+=("trojan://${uuid}@${prefer_host}:443?security=tls&type=ws&host=${argo_domain}&path=%2Ftrojan-ws&sni=${argo_domain}#${name}")
+    c_n="$(next_clash_name)"
+    clash_names+=("\"${c_n}\"")
+    clash_proxies+=("  - name: \"${c_n}\"
     type: trojan
     server: ${prefer_host}
     port: 443
@@ -1439,9 +1452,11 @@ generate_sub() {
   if [ -n "$reality_port" ] && [ -n "$reality_pub" ] && [ -n "$pub_ip" ]; then
     local r_host="${node_host#[}"
     r_host="${r_host%]}"
-    links+=("vless://${uuid}@${node_host}:${reality_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&type=tcp#${name}-Reality")
-    clash_names+=("\"${name}-Reality\"")
-    clash_proxies+=("  - name: \"${name}-Reality\"
+    links+=("vless://${uuid}@${node_host}:${reality_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&type=tcp#${name}")
+    local c_n
+    c_n="$(next_clash_name)"
+    clash_names+=("\"${c_n}\"")
+    clash_proxies+=("  - name: \"${c_n}\"
     type: vless
     server: ${r_host}
     port: ${reality_port}
@@ -1464,11 +1479,13 @@ generate_sub() {
   if [ -n "$ss_port" ] && [ -n "$pub_ip" ]; then
     local ss_uinfo
     ss_uinfo="$(b64 "2022-blake3-aes-128-gcm:${ss_pass}")"
-    links+=("ss://${ss_uinfo}@${node_host}:${ss_port}#${name}-SS2022")
+    links+=("ss://${ss_uinfo}@${node_host}:${ss_port}#${name}")
     local s_host="${node_host#[}"
     s_host="${s_host%]}"
-    clash_names+=("\"${name}-SS2022\"")
-    clash_proxies+=("  - name: \"${name}-SS2022\"
+    local c_n
+    c_n="$(next_clash_name)"
+    clash_names+=("\"${c_n}\"")
+    clash_proxies+=("  - name: \"${c_n}\"
     type: ss
     server: ${s_host}
     port: ${ss_port}
@@ -1487,7 +1504,7 @@ generate_sub() {
   if [ -n "$s5_port" ] && [ -n "$pub_ip" ]; then
     local s5_uinfo
     s5_uinfo="$(b64 "${s5_user}:${s5_pass}")"
-    links+=("socks://${s5_uinfo}@${node_host}:${s5_port}#${name}-Socks5")
+    links+=("socks://${s5_uinfo}@${node_host}:${s5_port}#${name}")
   fi
 
   # 5. 直连 Trojan-TCP
@@ -1498,7 +1515,20 @@ generate_sub() {
     tr_sni="$(get_val TROJAN_CERT_DOMAIN)"
     [ -z "$tr_sni" ] && tr_sni="$(get_val SERVER_DOMAIN)"
     [ -n "$tr_sni" ] && tr_sec="tls"
-    links+=("trojan://${uuid}@${node_host}:${trojan_port}?security=${tr_sec}&sni=${tr_sni:-bing.com}#${name}-Trojan-Direct")
+    links+=("trojan://${uuid}@${node_host}:${trojan_port}?security=${tr_sec}&sni=${tr_sni:-bing.com}#${name}")
+    local tr_host="${node_host#[}"
+    tr_host="${tr_host%]}"
+    local c_n
+    c_n="$(next_clash_name)"
+    clash_names+=("\"${c_n}\"")
+    clash_proxies+=("  - name: \"${c_n}\"
+    type: trojan
+    server: ${tr_host}
+    port: ${trojan_port}
+    password: ${uuid}
+    udp: true
+    sni: ${tr_sni:-bing.com}
+    skip-cert-verify: true")
   fi
 
   # 写入原始链接与 Base64
@@ -1758,8 +1788,8 @@ do_install() {
   ensure_basic_deps
 
   echo -e "${WHITE}请选择安装模式:${RESET}"
-  echo -e "  ${CYAN}1. 快速推荐安装${RESET}"
-  echo -e "  ${CYAN}2. 自定义参数安装${RESET}"
+  echo -e "  ${CYAN}1. 快速安装${RESET}"
+  echo -e "  ${CYAN}2. 自定义安装${RESET}"
   echo -e "  ${CYAN}0. 取消安装${RESET}"
   echo -e "${GREEN}----------------------------------------------------${RESET}"
   local inst_mode
@@ -2010,9 +2040,9 @@ menu_config() {
     cur_tp="$(get_val TROJAN_PORT "未启用")"
 
     if [ "$(get_val DISABLE_ARGO)" = "true" ]; then
-      cur_argo="已禁用"
-    elif [ -n "$(get_val ARGO_DOMAIN)" ]; then
-      cur_argo="$(get_val ARGO_DOMAIN)"
+      cur_argo="禁用"
+    elif [ -n "$(get_val ARGO_DOMAIN)" ] && [ -n "$(get_val ARGO_AUTH)" ]; then
+      cur_argo="固定隧道"
     else
       cur_argo="临时隧道"
     fi
@@ -2025,7 +2055,7 @@ menu_config() {
     echo -e "${WHITE}                    修改参数配置                    ${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
     echo -e "${WHITE} 1. 用户 UUID           : ${CYAN}${cur_u}${RESET}"
-    echo -e "${WHITE} 2. Reality 端口        : ${CYAN}${cur_rp}${RESET} | 域名: ${CYAN}${cur_rd}${RESET}"
+    echo -e "${WHITE} 2. Reality 端口        : ${CYAN}${cur_rp}${RESET} | Reality 域名: ${CYAN}${cur_rd}${RESET}"
     echo -e "${WHITE} 3. Shadowsocks 端口    : ${CYAN}${cur_sp}${RESET}"
     echo -e "${WHITE} 4. SOCKS5 协议端口     : ${CYAN}${cur_s5}${RESET}"
     echo -e "${WHITE} 5. Trojan 协议端口     : ${CYAN}${cur_tp}${RESET}"
@@ -2223,7 +2253,7 @@ do_menu() {
     echo -e "${WHITE} 6. 修改配置${RESET}"
     echo -e "${WHITE} 7. 出口设置${RESET}"
     echo -e "${WHITE} 8. 域名证书${RESET}"
-    echo -e "${WHITE} 9. 重置向导${RESET}"
+    echo -e "${WHITE} 9. 重新安装${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
     echo -e "${WHITE} 0. 退出面板${RESET}"
     echo -e "${GREEN}====================================================${RESET}"
@@ -2283,7 +2313,11 @@ case "${1:-}" in
         log "已卸载"
         ;;
       *)
-        do_menu
+        if [ ! -x "$XRAY_BIN" ]; then
+          do_install
+        else
+          do_menu
+        fi
         ;;
     esac
     ;;
