@@ -4,34 +4,6 @@
 
 ---
 
-## 🌟 核心特性与架构亮点
-
-1. **XTLS/Xray-core 官方原生内核**：集成最新官方多架构发行包，自带 `geoip.dat` 与 `geosite.dat` 规则资产。
-2. **直连王牌：VLESS + Reality (xtls-rprx-vision)**：
-   - 零证书申请，真实 TLS 1.3 偷取知名合规域名握手特征；
-   - 内置**地域自适应候选池 (Geo-Aware)** 与毫秒级 TLS 1.3 探测自检，规避顶流大厂特征被 ASN 比对风控。
-3. **CDN 穿透王牌：VLESS + xhttp (SplitHTTP, packet-up)**：
-   - 全新 HTTP/2 & HTTP/3 双向流分块协议，彻底消除传统 WebSocket 明显的握手特征与 QoS 限速，穿透能力与稳定性远超 WS。
-4. **Argo“六合一”单端口智能复用引擎**：
-   - 本地仅需开放一个端口（如 `8001`），自动智能分流：
-     - `GET /` ──▶ 高品质 Web 伪装主页；
-     - `GET /sub` ──▶ 动态生成全协议 Base64 订阅；
-     - `Upgrade: websocket` ──▶ 精准分流至 VLESS-WS、VMess-WS、Trojan-WS；
-     - `POST /vless-xhttp` ──▶ 原生反代至 Xray SplitHTTP 流通道。
-5. **Cloudflare WARP 原生 WireGuard 出口分流**：
-   - 自动注册 Cloudflare WARP 凭据，通过 Xray 原生 `wireguard` outbound 协议挂载；
-   - 支持**智能分流模式**（仅将 OpenAI、Netflix、Disney+、Gemini 等 AI/流媒体流量路由至 WARP 解锁，其余直连，零损耗）与**全局伪装模式**。
-6. **acme.sh 自动化域名证书体系**：
-   - 内置真实 SSL 证书申请向导，支持 Let's Encrypt 证书签发、Cron 计划任务每日自动续签，一键绑定至直连 TLS / Trojan 协议。
-7. **全客户端格式订阅导出**：
-   - 除了标准 Base64 与明文 URL 外，原生自动生成 **Clash Meta (Mihomo) 完整配置 YAML** 以及 **Xray 客户端专用配置 JSON**。
-8. **0 阻塞秒级冷启动与纯 IPv6 VPS 容灾**：
-   - 内置 NAT64/DNS64 动态递归注入，解决纯 IPv6 小鸡无法访问 GitHub 的顽疾；地理位置并发探测，冷启动提速 90% 以上。
-9. **多端同构支持**：
-   - 完整提供 **Node.js 运行端**、**纯 Python 运行端**、**Linux 旗舰一体化面板 (xray.sh)** 以及 **多架构 Docker 容器**。
-
----
-
 ## 🚀 部署方式
 
 ### 方式一：Docker 部署（推荐容器化部署）
