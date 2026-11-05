@@ -136,10 +136,12 @@ escape_json() {
 
 load_env() {
   [ -f "$ENV_FILE" ] || return 0
+  local k v
   while IFS='=' read -r k v || [ -n "$k" ]; do
     case "$k" in
       '#'*|'') continue ;;
       UUID|NAME|PUBLIC_IP|CUSTOM_PUBLIC_IP|IP|PORT|SUB|ARGO_*|CF_*|REALITY_*|XHTTP_*|SS_*|S5_*|TROJAN_*|KOMARI_*|SERVER_DOMAIN|DISABLE_ARGO|USE_GHPROXY)
+        [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
         v="${v#\"}"
         v="${v%\"}"
         printf -v "$k" '%s' "$v"
@@ -609,12 +611,14 @@ download_turn2socks() {
   fi
 
   if [ -n "$used_url" ] && [ -s "$tmp_t2s" ]; then
-    local sha_url="${used_url}.sha256"
-    local dgst_file="$work/t2s.sha256"
-    if curl -fsSL --max-time 5 "$sha_url" -o "$dgst_file" 2>/dev/null || download_file "$sha_url" "$dgst_file"; then
-      local dyn_sha
-      dyn_sha="$(awk '{print $1}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
-      [ -n "$dyn_sha" ] && exp_t2s_sha="$dyn_sha"
+    if [ -z "$exp_t2s_sha" ]; then
+      local sha_url="${used_url}.sha256"
+      local dgst_file="$work/t2s.sha256"
+      if curl -fsSL --max-time 5 "$sha_url" -o "$dgst_file" 2>/dev/null || download_file "$sha_url" "$dgst_file"; then
+        local dyn_sha
+        dyn_sha="$(awk '{print $1}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
+        [ -n "$dyn_sha" ] && exp_t2s_sha="$dyn_sha"
+      fi
     fi
     if command -v sha256sum >/dev/null 2>&1; then
       local act_t2s_sha
@@ -705,13 +709,17 @@ ensure_binaries() {
 # ── 8. 网络、端口与 IP 探测工具 ────────────────────────────────────────────────
 port_in_use_os() {
   local p="$1"
-  local my_pid=""
-  [ -f "$PID_FILE" ] && my_pid="$(cat "$PID_FILE" 2>/dev/null)"
+  local my_pid="" t2s_pid=""
+  [ -f "$PID_FILE" ] && my_pid="$(cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]')"
+  [ -f "$TURN2SOCKS_PID" ] && t2s_pid="$(cat "$TURN2SOCKS_PID" 2>/dev/null | tr -d '[:space:]')"
   if command -v ss >/dev/null 2>&1; then
     local match
     match="$(ss -ltnp 2>/dev/null | grep ":${p} ")"
     if [ -n "$match" ]; then
       if [ -n "$my_pid" ] && echo "$match" | grep -q "pid=${my_pid},"; then
+        return 1
+      fi
+      if [ -n "$t2s_pid" ] && echo "$match" | grep -q "pid=${t2s_pid},"; then
         return 1
       fi
       return 0
@@ -721,11 +729,33 @@ port_in_use_os() {
       if [ -n "$my_pid" ] && echo "$match" | grep -q "pid=${my_pid},"; then
         return 1
       fi
+      if [ -n "$t2s_pid" ] && echo "$match" | grep -q "pid=${t2s_pid},"; then
+        return 1
+      fi
       return 0
     fi
   elif command -v netstat >/dev/null 2>&1; then
-    netstat -ltn 2>/dev/null | grep -q ":${p} " && return 0
-    netstat -lun 2>/dev/null | grep -q ":${p} " && return 0
+    local n_match
+    n_match="$(netstat -ltnp 2>/dev/null | grep ":${p} ")"
+    if [ -n "$n_match" ]; then
+      if [ -n "$my_pid" ] && echo "$n_match" | grep -q "[ /]${my_pid}/"; then
+        return 1
+      fi
+      if [ -n "$t2s_pid" ] && echo "$n_match" | grep -q "[ /]${t2s_pid}/"; then
+        return 1
+      fi
+      return 0
+    fi
+    n_match="$(netstat -lunp 2>/dev/null | grep ":${p} ")"
+    if [ -n "$n_match" ]; then
+      if [ -n "$my_pid" ] && echo "$n_match" | grep -q "[ /]${my_pid}/"; then
+        return 1
+      fi
+      if [ -n "$t2s_pid" ] && echo "$n_match" | grep -q "[ /]${t2s_pid}/"; then
+        return 1
+      fi
+      return 0
+    fi
   fi
   return 1
 }
@@ -966,7 +996,6 @@ get_public_ip() {
   local custom_ip
   custom_ip="$(get_val CUSTOM_PUBLIC_IP)"
   [ -z "$custom_ip" ] && custom_ip="$(get_val IP)"
-  [ -z "$custom_ip" ] && custom_ip="$(get_val PUBLIC_IP)"
   if [ -n "$custom_ip" ] && is_valid_ip "$custom_ip"; then
     echo "$custom_ip"
     return
@@ -1003,7 +1032,13 @@ get_public_ip() {
     echo "$ip $(date +%s 2>/dev/null || echo 0)" > "$cache_file" 2>/dev/null || true
     echo "$ip"
   else
-    echo ""
+    local old_pub
+    old_pub="$(get_val PUBLIC_IP)"
+    if [ -n "$old_pub" ] && is_valid_ip "$old_pub" && [ "$old_pub" != "127.0.0.1" ] && [ "$old_pub" != "::1" ]; then
+      echo "$old_pub"
+    else
+      echo ""
+    fi
   fi
 }
 
@@ -1640,7 +1675,6 @@ EOF
       ;;
     3)
       echo -e "${CYAN}提示: TURN 出口将由配套组件 turn2socks 进行本地转接${RESET}"
-      stop_turn2socks 2>/dev/null || true
       local t_host t_port t_user t_pass="" t_lport
       read -p "TURN 服务器地址: " t_host
       t_host="$(printf '%s' "$t_host" | tr -d '[:space:]')"
@@ -1674,6 +1708,7 @@ LOCAL_PORT=${t_lport}
 ROUTE_MODE=${r_m}
 EOF
         chmod 600 "$OUTBOUND_FILE"
+        stop_turn2socks 2>/dev/null || true
         log "TURN 出口配置已保存，正在启动 turn2socks 并重启服务..."
         start_turn2socks
         do_restart
@@ -2433,11 +2468,12 @@ rules:
 EOF
   chmod 600 "$CLASH_META_FILE" 2>/dev/null || true
 
-  # 写入 Xray 客户端专用配置 JSON (仅当 Reality 启用时)
-  if [ -n "$reality_port" ] && [ -n "$reality_pub" ]; then
+  # 写入 Xray 客户端专用配置 JSON (仅当 Reality 启用且主机有效时)
+  if [ -n "$reality_port" ] && [ -n "$reality_pub" ] && [ -n "$node_host" ]; then
     local r_target_host="${node_host#[}"
     r_target_host="${r_target_host%]}"
-    cat > "$XRAY_CLIENT_FILE" << EOF
+    if [ -n "$r_target_host" ]; then
+      cat > "$XRAY_CLIENT_FILE" << EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
@@ -2471,7 +2507,10 @@ EOF
   ]
 }
 EOF
-    chmod 600 "$XRAY_CLIENT_FILE" 2>/dev/null || true
+      chmod 600 "$XRAY_CLIENT_FILE" 2>/dev/null || true
+    else
+      rm -f "$XRAY_CLIENT_FILE" 2>/dev/null || true
+    fi
   else
     rm -f "$XRAY_CLIENT_FILE" 2>/dev/null || true
   fi
@@ -2711,6 +2750,7 @@ setup_systemd() {
     cat > "/etc/systemd/system/${SVC_NAME}.service" << EOF
 [Unit]
 Description=Xray Universal Proxy Engine
+# Generated-by: universal-xray-installer
 After=network.target nss-lookup.target
 
 [Service]
@@ -2732,9 +2772,10 @@ EOF
     systemctl daemon-reload
     systemctl enable "${SVC_NAME}" >/dev/null 2>&1 || true
     log "Systemd 系统级服务 (${SVC_NAME}.service) 注册完成"
-  elif [ -d /etc/init.d ]; then
+  elif command -v rc-update >/dev/null 2>&1 && [ -x /sbin/openrc-run ]; then
     cat > /etc/init.d/xray << EOF
 #!/sbin/openrc-run
+# Generated-by: universal-xray-installer
 name="xray"
 description="Xray Universal Proxy Engine"
 command="/bin/bash"
@@ -2746,9 +2787,13 @@ depend() {
   need net
   after firewall
 }
+
+stop_post() {
+  /bin/bash "${APP_DIR}/xray.sh" stop
+}
 EOF
     chmod +x /etc/init.d/xray 2>/dev/null || true
-    command -v rc-update >/dev/null 2>&1 && rc-update add xray default >/dev/null 2>&1 || true
+    rc-update add xray default >/dev/null 2>&1 || true
     log "已通过 OpenRC (/etc/init.d/xray) 注册开机自启"
   elif command -v crontab >/dev/null 2>&1; then
     ensure_cron || true
@@ -3613,15 +3658,19 @@ do_uninstall() {
   case "$confirm" in
     y|Y)
       do_stop
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
-        systemctl daemon-reload >/dev/null 2>&1 || true
+      if [ -f "/etc/systemd/system/${SVC_NAME}.service" ] && grep -q "Generated-by: universal-xray-installer" "/etc/systemd/system/${SVC_NAME}.service" 2>/dev/null; then
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
+          systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        rm -f "/etc/systemd/system/${SVC_NAME}.service"
       fi
-      rm -f "/etc/systemd/system/${SVC_NAME}.service"
-      if command -v rc-update >/dev/null 2>&1; then
-        rc-update del xray default >/dev/null 2>&1 || true
+      if [ -f "/etc/init.d/xray" ] && grep -q "Generated-by: universal-xray-installer" "/etc/init.d/xray" 2>/dev/null; then
+        if command -v rc-update >/dev/null 2>&1; then
+          rc-update del xray default >/dev/null 2>&1 || true
+        fi
+        rm -f "/etc/init.d/xray"
       fi
-      rm -f "/etc/init.d/xray"
       if command -v crontab >/dev/null 2>&1; then
         crontab -l 2>/dev/null | grep -v "${APP_DIR}/xray.sh run" | crontab - 2>/dev/null || true
       fi
