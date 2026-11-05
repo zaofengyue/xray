@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'nodejs/**'
+      - 'turn2socks/**'
       - 'Dockerfile'
       - 'xray.sh'
       - '.github/workflows/build.yml'
@@ -48,6 +49,21 @@ jobs:
             --transform-object-keys true \
             --dead-code-injection false
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+
+      - name: Build turn2socks binaries
+        run: |
+          cd turn2socks
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o ../turn2socks-linux-amd64 .
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o ../turn2socks-linux-arm64 .
+          cd ..
+          sha256sum turn2socks-linux-amd64 > turn2socks-linux-amd64.sha256
+          sha256sum turn2socks-linux-arm64 > turn2socks-linux-arm64.sha256
+
       - name: Package release files
         run: |
           mkdir -p release
@@ -65,13 +81,14 @@ jobs:
           make_latest: true
           files: |
             xray.zip
+            turn2socks-linux-amd64
+            turn2socks-linux-amd64.sha256
+            turn2socks-linux-arm64
+            turn2socks-linux-arm64.sha256
           body: |
             ## Xray Universal Proxy Engine
-            下载 `xray.zip` 解压后上传到各类 PaaS 平台（如 Render, Koyeb, Serv00, HF 等）即可一键运行。
-            包含文件：
-            - `index.js`（Node.js 服务端引擎，已混淆脱敏）
-            - `package.json`
-            - `index.html`（高质量 Web 伪装网页）
+            - `xray.zip`: PaaS 容器/平台部署包（包含已混淆的 Node.js 核心引擎 index.js、package.json 与伪装网页 index.html）
+            - `turn2socks-linux-*`: 官方内置配套 TURN 智能中继转接组件（支持 amd64/arm64，附带 `.sha256` 完整性校验）
 
   docker:
     name: Multi-Arch Docker Build

@@ -474,26 +474,65 @@ download_turn2socks() {
     return 0
   fi
 
-  # 优先检测本地源码目录并尝试由本地 Go 编译
-  if [ -d "$APP_DIR/turn2socks" ] && command -v go >/dev/null 2>&1; then
-    log "检测到本地 Go 环境，正在编译 turn2socks..."
-    if (cd "$APP_DIR/turn2socks" && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o "$TURN2SOCKS_BIN" .) >/dev/null 2>&1; then
+  # 1. 优先检测本地仓库源码及 Go 编译环境
+  local local_src=""
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  for d in "$script_dir/turn2socks" "$PWD/turn2socks" "$APP_DIR/turn2socks"; do
+    if [ -f "$d/main.go" ]; then
+      local_src="$d"
+      break
+    fi
+  done
+
+  # 1.1 若本地有预置的同架构二进制，直接拷贝复用
+  for b in "$script_dir/turn2socks-linux-${t2s_arch}" "$script_dir/bin/turn2socks" "$script_dir/turn2socks"; do
+    if [ -x "$b" ] && [ ! -d "$b" ]; then
+      cp -f "$b" "$TURN2SOCKS_BIN"
       chmod +x "$TURN2SOCKS_BIN"
-      log "turn2socks 本地编译成功"
+      log "turn2socks 组件已就绪 (复用本地预置: $b)"
+      return 0
+    fi
+  done
+
+  # 1.2 若检测到本地源码且具备 go 编译器，直接本地原生编译
+  if [ -n "$local_src" ] && command -v go >/dev/null 2>&1; then
+    log "检测到本地项目仓库源码及 Go 编译环境，正在就地编译 turn2socks..."
+    if (cd "$local_src" && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o "$TURN2SOCKS_BIN" .) >/dev/null 2>&1; then
+      chmod +x "$TURN2SOCKS_BIN"
+      log "turn2socks 本地源码编译成功"
       return 0
     fi
   fi
 
-  log "正在部署官方配套组件 turn2socks (已启用 SHA256 完整性校验)..."
-  log "正在下载 turn2socks 二进制 (${t2s_arch})..."
-  local url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
+  # 2. 无法本地编译时，从本仓库官方 Release 获取配套二进制
+  log "正在部署本仓库官方配套组件 turn2socks..."
+  local primary_url="https://github.com/zaofengyue/xray/releases/download/latest/turn2socks-linux-${t2s_arch}"
+  local fallback_url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
 
   local work
   work="$(mktemp -d "$APP_DIR/.dl.XXXXXX" 2>/dev/null || echo "$APP_DIR/.dl_$$")"
   mkdir -p "$work" && chmod 700 "$work"
   local tmp_t2s="$work/turn2socks"
+  local used_url=""
 
-  if download_file "$url" "$tmp_t2s"; then
+  if download_file "$primary_url" "$tmp_t2s"; then
+    used_url="$primary_url"
+  elif download_file "$fallback_url" "$tmp_t2s"; then
+    used_url="$fallback_url"
+  fi
+
+  if [ -n "$used_url" ] && [ -s "$tmp_t2s" ]; then
+    # 动态尝试获取 Release 发布的实时 sha256 校验和文件
+    local tmp_sha="$work/turn2socks.sha256"
+    if download_file "${used_url}.sha256" "$tmp_sha"; then
+      local dynamic_sha
+      dynamic_sha="$(awk '{print $1}' "$tmp_sha" 2>/dev/null | tr -d '[:space:]')"
+      if [ -n "$dynamic_sha" ] && [ "${#dynamic_sha}" -eq 64 ]; then
+        exp_t2s_sha="$dynamic_sha"
+      fi
+    fi
+
     if command -v sha256sum >/dev/null 2>&1; then
       local act_t2s_sha
       act_t2s_sha="$(sha256sum "$tmp_t2s" 2>/dev/null | awk '{print $1}')"
