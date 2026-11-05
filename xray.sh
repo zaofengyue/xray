@@ -583,8 +583,8 @@ download_turn2socks() {
 
   # 2. 无法本地编译时，从本仓库官方 Release 获取配套二进制
   log "正在部署本仓库官方配套组件 turn2socks..."
-  local primary_url="https://github.com/zaofengyue/xray/releases/download/latest/turn2socks-linux-${t2s_arch}"
-  local fallback_url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
+  local primary_url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
+  local fallback_url="https://github.com/zaofengyue/xray/releases/download/latest/turn2socks-linux-${t2s_arch}"
 
   local work
   work="$(mktemp -d "$APP_DIR/.dl.XXXXXX" 2>/dev/null || echo "$APP_DIR/.dl_$$")"
@@ -599,40 +599,20 @@ download_turn2socks() {
   fi
 
   if [ -n "$used_url" ] && [ -s "$tmp_t2s" ]; then
-    # 动态尝试获取 Release 发布的实时 sha256 校验和文件
-    local tmp_sha="$work/turn2socks.sha256"
-    if download_file "${used_url}.sha256" "$tmp_sha"; then
-      local dynamic_sha
-      dynamic_sha="$(awk '{print $1}' "$tmp_sha" 2>/dev/null | tr -d '[:space:]')"
-      if [ -n "$dynamic_sha" ] && [ "${#dynamic_sha}" -eq 64 ]; then
-        exp_t2s_sha="$dynamic_sha"
-      fi
-    fi
-
     if command -v sha256sum >/dev/null 2>&1; then
       local act_t2s_sha
       act_t2s_sha="$(sha256sum "$tmp_t2s" 2>/dev/null | awk '{print $1}')"
       if [ -n "$exp_t2s_sha" ] && [ "$act_t2s_sha" != "$exp_t2s_sha" ]; then
-        warn "turn2socks 检测到远端版本与内置已知指纹不一致"
-        warn "已知指纹: ${exp_t2s_sha:0:16}..., 实际计算: ${act_t2s_sha:0:16}..."
-        if [ -t 0 ] && { : </dev/tty; } 2>/dev/null; then
-          read -p "是否信任并继续使用此新版本？[y/N]: " t2s_bypass </dev/tty
-          case "$t2s_bypass" in
-            y|Y) warn "已确认使用新版本" ;;
-            *)
-              rm -rf "$work"
-              warn "已终止未验证组件安装"
-              return 1
-              ;;
-          esac
-        else
-          rm -rf "$work"
-          warn "非交互环境下哈希指纹不匹配，为保障安全已终止安装"
-          return 1
-        fi
-      else
-        log "turn2socks SHA256 安全校验通过 (${act_t2s_sha:0:16}...)"
+        rm -rf "$work"
+        warn "turn2socks SHA256 校验失败 (安全哈希不匹配)"
+        return 1
       fi
+      log "turn2socks SHA256 校验通过 (${act_t2s_sha:0:16}...)"
+    fi
+    if ! is_valid_elf "$tmp_t2s"; then
+      rm -rf "$work"
+      warn "turn2socks 二进制格式异常 (非合法 ELF)"
+      return 1
     fi
     mv -f "$tmp_t2s" "$TURN2SOCKS_BIN"
     chmod +x "$TURN2SOCKS_BIN"
@@ -713,9 +693,24 @@ ensure_binaries() {
 # ── 8. 网络、端口与 IP 探测工具 ────────────────────────────────────────────────
 port_in_use_os() {
   local p="$1"
+  local my_pid=""
+  [ -f "$PID_FILE" ] && my_pid="$(cat "$PID_FILE" 2>/dev/null)"
   if command -v ss >/dev/null 2>&1; then
-    ss -ltn 2>/dev/null | grep -q ":${p} " && return 0
-    ss -lun 2>/dev/null | grep -q ":${p} " && return 0
+    local match
+    match="$(ss -ltnp 2>/dev/null | grep ":${p} ")"
+    if [ -n "$match" ]; then
+      if [ -n "$my_pid" ] && echo "$match" | grep -q "pid=${my_pid},"; then
+        return 1
+      fi
+      return 0
+    fi
+    match="$(ss -lunp 2>/dev/null | grep ":${p} ")"
+    if [ -n "$match" ]; then
+      if [ -n "$my_pid" ] && echo "$match" | grep -q "pid=${my_pid},"; then
+        return 1
+      fi
+      return 0
+    fi
   elif command -v netstat >/dev/null 2>&1; then
     netstat -ltn 2>/dev/null | grep -q ":${p} " && return 0
     netstat -lun 2>/dev/null | grep -q ":${p} " && return 0
@@ -738,7 +733,7 @@ is_valid_port_or_empty() {
 }
 
 prompt_port() {
-  local prompt_text="$1" default_val="$2"
+  local prompt_text="$1" default_val="${2:-}" exclude_ports="${3:-}"
   local res
   while true; do
     read -p "$prompt_text" res
@@ -750,6 +745,10 @@ prompt_port() {
     fi
     if is_reserved_port "$res"; then
       warn "端口 $res 为脚本内部保留端口 (8001, 10000-10003, 10808-10809)，请换用其他端口"
+      continue
+    fi
+    if [ -n "$exclude_ports" ] && [[ " $exclude_ports " =~ " $res " ]]; then
+      warn "端口 $res 已被其他协议入站选用，请勿重复使用"
       continue
     fi
     if port_in_use_os "$res"; then
@@ -971,7 +970,7 @@ get_public_ip() {
 get_node_name_prefix() {
   local custom_name
   custom_name="$(get_val NAME)"
-  if [ -n "$custom_name" ] && [ "$custom_name" != "xray" ] && [ "$custom_name" != "xr" ]; then
+  if [ -n "$custom_name" ] && [ "$custom_name" != "xray" ] && [ "$custom_name" != "xr" ] && [ "$custom_name" != "xr-Node" ]; then
     echo "$custom_name"
     return
   fi
@@ -1030,12 +1029,13 @@ get_node_name_prefix() {
   local name_tag
   if [ -n "$country" ] && [ -n "$org" ]; then
     name_tag="${country}-${org}"
+    set_val NAME "$name_tag"
   elif [ -n "$country" ]; then
     name_tag="${country}-Node"
+    set_val NAME "$name_tag"
   else
     name_tag="xr-Node"
   fi
-  set_val NAME "$name_tag"
   echo "$name_tag"
 }
 
@@ -1153,8 +1153,9 @@ get_socks5_creds() {
 get_reality_short_id() {
   local sid
   sid="$(get_val REALITY_SHORT_ID)"
-  if [ -z "$sid" ] || [[ ! "$sid" =~ ^[0-9a-fA-F]{2,16}$ ]]; then
-    sid="$(od -An -tx1 -N4 /dev/urandom 2>/dev/null | tr -d ' \n' || openssl rand -hex 4 2>/dev/null || echo "1a2b3c4d")"
+  if [ -z "$sid" ] || [[ ! "$sid" =~ ^[0-9a-fA-F]{8}$ ]]; then
+    sid="$(openssl rand -hex 4 2>/dev/null || od -An -tx1 -N4 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    [ -z "$sid" ] && sid="$(printf '%08x' "$$")"
     set_val REALITY_SHORT_ID "$sid"
   fi
   echo "$sid"
@@ -1519,7 +1520,10 @@ menu_outbound() {
       fi
       read -p "用户名 (留空无认证): " p_user
       local p_pass=""
-      [ -n "$p_user" ] && read -p "密码: " p_pass
+      if [ -n "$p_user" ]; then
+        read -s -p "密码: " p_pass
+        echo ""
+      fi
       local r_m
       r_m="$(prompt_route_mode)"
       stop_turn2socks 2>/dev/null || true
@@ -1553,7 +1557,10 @@ EOF
       fi
       read -p "用户名 (留空无认证): " t_user
       local t_pass=""
-      [ -n "$t_user" ] && read -p "密码: " t_pass
+      if [ -n "$t_user" ]; then
+        read -s -p "密码: " t_pass
+        echo ""
+      fi
       t_lport="$(prompt_port "本地 SOCKS5 转接端口 [默认 10808]: " "10808")"
       if [ -n "$t_host" ]; then
         local r_m
@@ -1635,7 +1642,7 @@ generate_config() {
   listen_addr="$(get_inbound_listen_addr)"
 
   local tmp_cfg
-  tmp_cfg="$(mktemp "${STATE_DIR}/config.tmp.XXXXXX" 2>/dev/null || echo "${STATE_DIR}/config.tmp.$$")"
+  tmp_cfg="${STATE_DIR}/config.tmp.$$.json"
 
   cat > "$tmp_cfg" << EOF
 {
@@ -1781,7 +1788,7 @@ EOF
           "xver": 0,
           "serverNames": ["'"$reality_domain"'"],
           "privateKey": "'"$reality_priv"'",
-          "shortIds": ["'"$reality_sid"'", ""]
+          "shortIds": ["'"$reality_sid"'"]
         }
       },
       "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
@@ -1808,7 +1815,7 @@ EOF
           "xver": 0,
           "serverNames": ["'"$reality_domain"'"],
           "privateKey": "'"$reality_priv"'",
-          "shortIds": ["'"$reality_sid"'", ""]
+          "shortIds": ["'"$reality_sid"'"]
         },
         "xhttpSettings": {
           "path": "/xhttp",
@@ -1996,7 +2003,7 @@ EOF
   cat >> "$tmp_cfg" << EOF
   ],
   "routing": {
-    "domainStrategy": "IPIfNonMatch",
+    "domainStrategy": "IPOnDemand",
     "rules": [
       {
         "type": "field",
@@ -2047,7 +2054,7 @@ EOF
 EOF
   chmod 600 "$tmp_cfg"
   if [ -x "$XRAY_BIN" ]; then
-    if "$XRAY_BIN" run -test -config "$tmp_cfg" >/dev/null 2>&1; then
+    if "$XRAY_BIN" run -test -format json -config "$tmp_cfg" >/dev/null 2>&1; then
       mv -f "$tmp_cfg" "$CONFIG_FILE"
       chmod 600 "$CONFIG_FILE"
       return 0
@@ -2445,7 +2452,15 @@ do_run() {
     stop_pid_file "$KM_PID"
     km_dom="${km_dom#http://}"
     km_dom="${km_dom#https://}"
-    "$KM_BIN" -e "$km_dom" -t "$km_tok" > "$KM_LOG" 2>&1 &
+    local km_conf="$STATE_DIR/komari.json"
+    cat > "$km_conf" << EOF
+{
+  "endpoint": "${km_dom}",
+  "token": "${km_tok}"
+}
+EOF
+    chmod 600 "$km_conf"
+    AGENT_ENDPOINT="$km_dom" AGENT_TOKEN="$km_tok" "$KM_BIN" --config "$km_conf" > "$KM_LOG" 2>&1 &
     echo $! > "$KM_PID"
     log "Komari 监控探针已启动"
   fi
@@ -2490,8 +2505,23 @@ do_run() {
           echo $! > "$CF_PID"
         else
           a_args+=("--url" "http://127.0.0.1:8001")
+          > "$CF_LOG" 2>/dev/null || true
           "$CF_BIN" "${a_args[@]}" >> "$CF_LOG" 2>&1 &
           echo $! > "$CF_PID"
+          (
+            sleep 3
+            local nh="" cnt=0
+            while [ $cnt -lt 30 ]; do
+              nh="$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | grep -v 'api\.trycloudflare\.com' | tail -n 1 | sed 's|https://||')"
+              [ -n "$nh" ] && break
+              sleep 1
+              cnt=$((cnt + 1))
+            done
+            if [ -n "$nh" ] && [ "$nh" != "$(get_val ARGO_DOMAIN)" ]; then
+              set_val ARGO_DOMAIN "$nh"
+              generate_sub >/dev/null 2>&1 || true
+            fi
+          ) &
         fi
       fi
     fi
@@ -2505,7 +2535,15 @@ do_run() {
         kt="$(get_val KOMARI_TOKEN)"
         kd="${kd#http://}"
         kd="${kd#https://}"
-        "$KM_BIN" -e "$kd" -t "$kt" >> "$KM_LOG" 2>&1 &
+        local km_conf="$STATE_DIR/komari.json"
+        cat > "$km_conf" << EOF
+{
+  "endpoint": "${kd}",
+  "token": "${kt}"
+}
+EOF
+        chmod 600 "$km_conf"
+        AGENT_ENDPOINT="$kd" AGENT_TOKEN="$kt" "$KM_BIN" --config "$km_conf" >> "$KM_LOG" 2>&1 &
         echo $! > "$KM_PID"
       fi
     fi
@@ -2737,6 +2775,7 @@ do_install() {
   echo -e "${GREEN}====================================================${RESET}"
   echo -e "${WHITE}               Xray 智能自动化部署向导               ${RESET}"
   echo -e "${GREEN}====================================================${RESET}"
+  do_stop 2>/dev/null || true
   ensure_basic_deps
 
   echo -e "${WHITE}请选择安装模式:${RESET}"
@@ -2818,8 +2857,12 @@ do_install() {
     rec_s5="$(get_random_high_port)"
     rec_tr="$(get_random_high_port)"
 
-    in_reality_port="$(prompt_port "Reality TCP 端口 [默认推荐高位 ${rec_r}，填 0 关闭]: " "$rec_r")"
-    in_xhttp_port="$(prompt_port "Reality xhttp 端口 [默认推荐高位 ${rec_xh}，填 0 关闭]: " "$rec_xh")"
+    local chosen_ports=""
+    in_reality_port="$(prompt_port "Reality TCP 端口 [默认推荐高位 ${rec_r}，填 0 关闭]: " "$rec_r" "$chosen_ports")"
+    [ -n "$in_reality_port" ] && chosen_ports="$chosen_ports $in_reality_port"
+
+    in_xhttp_port="$(prompt_port "Reality xhttp 端口 [默认推荐高位 ${rec_xh}，填 0 关闭]: " "$rec_xh" "$chosen_ports")"
+    [ -n "$in_xhttp_port" ] && chosen_ports="$chosen_ports $in_xhttp_port"
 
     if [ -n "$in_reality_port" ] || [ -n "$in_xhttp_port" ]; then
       read -p "Reality 伪装域名 [默认 www.iij.ad.jp]: " in_reality_domain
@@ -2827,14 +2870,16 @@ do_install() {
       in_reality_domain="$(printf '%s' "$in_reality_domain" | tr -d '[:space:]')"
     fi
 
-    in_ss_port="$(prompt_port "Shadowsocks 2022 端口 [默认推荐高位 ${rec_ss}，填 0 关闭]: " "$rec_ss")"
+    in_ss_port="$(prompt_port "Shadowsocks 2022 端口 [默认推荐高位 ${rec_ss}，填 0 关闭]: " "$rec_ss" "$chosen_ports")"
+    [ -n "$in_ss_port" ] && chosen_ports="$chosen_ports $in_ss_port"
     if [ -n "$in_ss_port" ]; then
       read -s -p "SS 密码 [留空随机生成]: " in_ss_pass
       echo ""
       in_ss_pass="$(get_ss2022_key "$in_ss_pass")"
     fi
 
-    in_s5_port="$(prompt_port "SOCKS5 端口 [填 0 或留空关闭]: " "0")"
+    in_s5_port="$(prompt_port "SOCKS5 端口 [填 0 或留空关闭]: " "0" "$chosen_ports")"
+    [ -n "$in_s5_port" ] && chosen_ports="$chosen_ports $in_s5_port"
     read -r in_s5_user in_s5_pass <<< "$(get_socks5_creds)"
     if [ -n "$in_s5_port" ]; then
       read -p "SOCKS5 用户名 [默认 ${in_s5_user}]: " custom_s5_u
@@ -2844,7 +2889,8 @@ do_install() {
       in_s5_pass="$(printf '%s' "${custom_s5_p:-$in_s5_pass}" | tr -d '[:space:]' | tr -d '\"'"'")"
     fi
 
-    in_trojan_port="$(prompt_port "Trojan-TCP 端口 [填 0 或留空关闭]: " "0")"
+    in_trojan_port="$(prompt_port "Trojan-TCP 端口 [填 0 或留空关闭]: " "0" "$chosen_ports")"
+    [ -n "$in_trojan_port" ] && chosen_ports="$chosen_ports $in_trojan_port"
     if [ -n "$in_trojan_port" ]; then
       local in_trojan_pass
       read -s -p "Trojan 密码 [留空自动生成]: " in_trojan_pass
@@ -2905,7 +2951,7 @@ do_install() {
       fi
       if [ -f "$CF_LOG" ]; then
         local found_h
-        found_h="$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | tail -n 1 | sed 's|https://||')"
+        found_h="$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | grep -v 'api\.trycloudflare\.com' | tail -n 1 | sed 's|https://||')"
         if [ -n "$found_h" ]; then
           set_val ARGO_DOMAIN "$found_h"
           break
@@ -3138,34 +3184,11 @@ menu_config() {
         sleep 1
         ;;
       2)
-        read -p "Reality TCP 端口 [默认 ${cur_rp}，填 0 关闭]: " new_rp
-        new_rp="${new_rp:-$cur_rp}"
-        [ "$new_rp" = "0" ] || [ "$new_rp" = "未启用" ] && new_rp=""
-        if ! is_valid_port_or_empty "$new_rp"; then
-          warn "端口非法，必须为 1-65535 的数字"
-          press_any_key
-          continue
-        fi
-        if is_reserved_port "$new_rp"; then
-          warn "端口 $new_rp 为脚本内部保留端口，请换用其他端口"
-          press_any_key
-          continue
-        fi
-        set_val REALITY_PORT "$new_rp"
+        local cur_other_p="$cur_sp $cur_s5 $cur_tp"
+        new_rp="$(prompt_port "Reality TCP 端口 [默认 ${cur_rp}，填 0 关闭]: " "$cur_rp" "$cur_other_p")"
+        new_xp="$(prompt_port "Reality xhttp 端口 [默认 ${cur_xp}，填 0 关闭]: " "$cur_xp" "$new_rp $cur_other_p")"
 
-        read -p "Reality xhttp 端口 [默认 ${cur_xp}，填 0 关闭]: " new_xp
-        new_xp="${new_xp:-$cur_xp}"
-        [ "$new_xp" = "0" ] || [ "$new_xp" = "未启用" ] && new_xp=""
-        if ! is_valid_port_or_empty "$new_xp"; then
-          warn "端口非法，必须为 1-65535 的数字"
-          press_any_key
-          continue
-        fi
-        if is_reserved_port "$new_xp"; then
-          warn "端口 $new_xp 为脚本内部保留端口，请换用其他端口"
-          press_any_key
-          continue
-        fi
+        set_val REALITY_PORT "$new_rp"
         set_val XHTTP_PORT "$new_xp"
 
         if [ -n "$new_rp" ] || [ -n "$new_xp" ]; then
@@ -3188,19 +3211,8 @@ menu_config() {
         sleep 1
         ;;
       3)
-        read -p "Shadowsocks 端口 [默认 ${cur_sp}，填 0 关闭]: " new_sp
-        new_sp="${new_sp:-$cur_sp}"
-        [ "$new_sp" = "0" ] || [ "$new_sp" = "未启用" ] && new_sp=""
-        if ! is_valid_port_or_empty "$new_sp"; then
-          warn "端口非法，必须为 1-65535 的数字"
-          press_any_key
-          continue
-        fi
-        if is_reserved_port "$new_sp"; then
-          warn "端口 $new_sp 为脚本内部保留端口，请换用其他端口"
-          press_any_key
-          continue
-        fi
+        local cur_other_p="$cur_rp $cur_xp $cur_s5 $cur_tp"
+        new_sp="$(prompt_port "Shadowsocks 端口 [默认 ${cur_sp}，填 0 关闭]: " "$cur_sp" "$cur_other_p")"
         [ -n "$cur_sp" ] && [ "$cur_sp" != "未启用" ] && [ "$cur_sp" != "$new_sp" ] && close_firewall_port "$cur_sp" both
         set_val SS_PORT "$new_sp"
         if [ -n "$new_sp" ]; then
@@ -3217,19 +3229,8 @@ menu_config() {
         sleep 1
         ;;
       4)
-        read -p "SOCKS5 协议端口 [默认 ${cur_s5}，填 0 关闭]: " new_s5
-        new_s5="${new_s5:-$cur_s5}"
-        [ "$new_s5" = "0" ] || [ "$new_s5" = "未启用" ] && new_s5=""
-        if ! is_valid_port_or_empty "$new_s5"; then
-          warn "端口非法，必须为 1-65535 的数字"
-          press_any_key
-          continue
-        fi
-        if is_reserved_port "$new_s5"; then
-          warn "端口 $new_s5 为脚本内部保留端口，请换用其他端口"
-          press_any_key
-          continue
-        fi
+        local cur_other_p="$cur_rp $cur_xp $cur_sp $cur_tp"
+        new_s5="$(prompt_port "SOCKS5 协议端口 [默认 ${cur_s5}，填 0 关闭]: " "$cur_s5" "$cur_other_p")"
         [ -n "$cur_s5" ] && [ "$cur_s5" != "未启用" ] && [ "$cur_s5" != "$new_s5" ] && close_firewall_port "$cur_s5" both
         set_val S5_PORT "$new_s5"
         if [ -n "$new_s5" ]; then
@@ -3249,19 +3250,8 @@ menu_config() {
         sleep 1
         ;;
       5)
-        read -p "Trojan 协议端口 [默认 ${cur_tp}，填 0 关闭]: " new_tp
-        new_tp="${new_tp:-$cur_tp}"
-        [ "$new_tp" = "0" ] || [ "$new_tp" = "未启用" ] && new_tp=""
-        if ! is_valid_port_or_empty "$new_tp"; then
-          warn "端口非法，必须为 1-65535 的数字"
-          press_any_key
-          continue
-        fi
-        if is_reserved_port "$new_tp"; then
-          warn "端口 $new_tp 为脚本内部保留端口，请换用其他端口"
-          press_any_key
-          continue
-        fi
+        local cur_other_p="$cur_rp $cur_xp $cur_sp $cur_s5"
+        new_tp="$(prompt_port "Trojan 协议端口 [默认 ${cur_tp}，填 0 关闭]: " "$cur_tp" "$cur_other_p")"
         [ -n "$cur_tp" ] && [ "$cur_tp" != "未启用" ] && [ "$cur_tp" != "$new_tp" ] && close_firewall_port "$cur_tp" tcp
         set_val TROJAN_PORT "$new_tp"
         if [ -n "$new_tp" ]; then
@@ -3469,7 +3459,7 @@ do_uninstall() {
         p_xhttp="$(get_val XHTTP_PORT)"
         p_tro="$(get_val TROJAN_PORT)"
         p_ss="$(get_val SS_PORT)"
-        p_s5="$(get_val SOCKS5_PORT)"
+        p_s5="$(get_val S5_PORT)"
         [ -n "$p_real" ]  && close_firewall_port "$p_real" tcp
         [ -n "$p_xhttp" ] && close_firewall_port "$p_xhttp" tcp
         [ -n "$p_tro" ]   && close_firewall_port "$p_tro" tcp
