@@ -29,8 +29,8 @@ fi
 set -u
 umask 077
 
-# 当脚本通过 curl | bash 等管道执行时，若有可用终端则重定向 stdin 以保障交互正常
-if [ ! -t 0 ] && { : </dev/tty; } 2>/dev/null; then
+# 当脚本通过 curl | bash 等管道执行且非后台守护 (run) 模式时，若有可用终端则重定向 stdin 以保障交互正常
+if [ "${1:-}" != "run" ] && [ ! -t 0 ] && { : </dev/tty; } 2>/dev/null; then
   exec </dev/tty
 fi
 
@@ -140,6 +140,9 @@ load_env() {
     case "$k" in
       '#'*|'') continue ;;
       *)
+        case "$k" in
+          PATH|SHELL|USER|HOME|IFS) continue ;;
+        esac
         if [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
           v="${v#\"}"
           v="${v%\"}"
@@ -398,9 +401,9 @@ download_xray() {
     return 1
   fi
 
-  # 严格校验 SHA256 安全哈希，防范中间人攻击 (复用 download_file 确保纯 IPv6/NAT64 兼容)
+  # 严格校验 SHA256 安全哈希，防范中间人攻击 (优先直连 GitHub 获取官方哈希防范第三方镜像篡改)
   local exp_sha=""
-  if download_file "${url}.dgst" "$dgst_file"; then
+  if curl -fsSL --max-time 5 "${url}.dgst" -o "$dgst_file" 2>/dev/null || download_file "${url}.dgst" "$dgst_file"; then
     exp_sha="$(awk -F'= ' '/SHA2-256/{print $2}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
   fi
 
@@ -555,7 +558,7 @@ download_turn2socks() {
   local local_src=""
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  for d in "$script_dir/turn2socks" "$PWD/turn2socks" "$APP_DIR/turn2socks"; do
+  for d in "$script_dir/turn2socks" "$APP_DIR/turn2socks"; do
     if [ -f "$d/main.go" ]; then
       local_src="$d"
       break
@@ -721,7 +724,7 @@ port_in_use_os() {
 
 is_reserved_port() {
   case "$1" in
-    8001|10000|10001|10002|10003|10808|10809) return 0 ;;
+    8001|10000|10001|10002|10003) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -745,7 +748,7 @@ prompt_port() {
       continue
     fi
     if is_reserved_port "$res"; then
-      warn "端口 $res 为脚本内部保留端口 (8001, 10000-10003, 10808-10809)，请换用其他端口"
+      warn "端口 $res 为脚本内部保留端口 (8001, 10000-10003)，请换用其他端口"
       continue
     fi
     if [ -n "$exclude_ports" ] && [[ " $exclude_ports " =~ " $res " ]]; then
@@ -758,6 +761,20 @@ prompt_port() {
     fi
     echo "$res"
     return 0
+  done
+}
+
+prompt_remote_port() {
+  local prompt_text="$1" default_val="${2:-}"
+  local res
+  while true; do
+    read -p "$prompt_text" res
+    res="${res:-$default_val}"
+    if is_valid_port_or_empty "$res" && [ -n "$res" ]; then
+      echo "$res"
+      return 0
+    fi
+    warn "端口格式错误，必须为 1-65535 的有效端口数字 (1-65535)"
   done
 }
 
@@ -938,10 +955,22 @@ is_valid_ip() {
 
 get_public_ip() {
   local custom_ip
-  custom_ip="$(get_val PUBLIC_IP)"
+  custom_ip="$(get_val CUSTOM_PUBLIC_IP)"
+  [ -z "$custom_ip" ] && custom_ip="$(get_val IP)"
   if [ -n "$custom_ip" ] && is_valid_ip "$custom_ip"; then
     echo "$custom_ip"
     return
+  fi
+
+  local cache_file="$STATE_DIR/.cached_ip"
+  if [ -f "$cache_file" ]; then
+    local c_ip c_time now
+    read -r c_ip c_time < "$cache_file" 2>/dev/null || true
+    now="$(date +%s 2>/dev/null || echo 0)"
+    if [ -n "$c_ip" ] && is_valid_ip "$c_ip" && [ -n "$c_time" ] && [ $((now - c_time)) -lt 43200 ]; then
+      echo "$c_ip"
+      return
+    fi
   fi
 
   local ip=""
@@ -961,10 +990,10 @@ get_public_ip() {
     ip="$(echo "$ip" | tr -d '[:space:]')"
   fi
   if is_valid_ip "$ip" && [ "$ip" != "127.0.0.1" ] && [ "$ip" != "::1" ]; then
-    set_val PUBLIC_IP "$ip"
+    echo "$ip $(date +%s 2>/dev/null || echo 0)" > "$cache_file" 2>/dev/null || true
     echo "$ip"
   else
-    echo "127.0.0.1"
+    echo ""
   fi
 }
 
@@ -1165,16 +1194,31 @@ get_ss_pass() {
   echo "$k"
 }
 
+get_random_hex() {
+  local num="${1:-4}"
+  local h=""
+  if command -v openssl >/dev/null 2>&1; then
+    h="$(openssl rand -hex "$num" 2>/dev/null || true)"
+  fi
+  if [ -z "$h" ] && [ -r /dev/urandom ]; then
+    h="$(od -An -tx1 -N"$num" /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
+  fi
+  if [ -z "$h" ]; then
+    h="$(date +%s%N 2>/dev/null | sha256sum 2>/dev/null | head -c "$((num * 2))" || echo "$$")"
+  fi
+  printf '%s' "$h"
+}
+
 get_socks5_creds() {
   local u p
   u="$(get_val S5_USER)"
   p="$(get_val S5_PASS)"
   if [ -z "$u" ]; then
-    u="user$(od -An -tx1 -N3 /dev/urandom 2>/dev/null | tr -d ' \n' || echo $RANDOM)"
+    u="user$(get_random_hex 3)"
     set_val S5_USER "$u"
   fi
   if [ -z "$p" ]; then
-    p="pass$(od -An -tx1 -N6 /dev/urandom 2>/dev/null | tr -d ' \n' || echo $RANDOM$RANDOM)"
+    p="pass$(get_random_hex 6)"
     set_val S5_PASS "$p"
   fi
   echo "$u $p"
@@ -1184,7 +1228,7 @@ get_reality_short_id() {
   local sid
   sid="$(get_val REALITY_SHORT_ID)"
   if [ -z "$sid" ] || [[ ! "$sid" =~ ^[0-9a-fA-F]{8}$ ]]; then
-    sid="$(openssl rand -hex 4 2>/dev/null || od -An -tx1 -N4 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    sid="$(get_random_hex 4)"
     [ -z "$sid" ] && sid="$(printf '%08x' "$$")"
     set_val REALITY_SHORT_ID "$sid"
   fi
@@ -1195,7 +1239,7 @@ get_trojan_pass() {
   local p
   p="$(get_val TROJAN_PASS)"
   if [ -z "$p" ]; then
-    p="$(od -An -tx1 -N12 /dev/urandom 2>/dev/null | tr -d ' \n' || openssl rand -hex 12 2>/dev/null || echo "tr_$(date +%s)")"
+    p="$(get_random_hex 12)"
     set_val TROJAN_PASS "$p"
   fi
   echo "$p"
@@ -1239,7 +1283,7 @@ ensure_acme() {
   fi
   chmod +x "$tmp_acme/acme.sh"
   ensure_cron || true
-  (cd "$tmp_acme" && ./acme.sh --install --home "$ACME_HOME" --force >/dev/null 2>&1)
+  (cd "$tmp_acme" && ./acme.sh --install --home "$ACME_HOME" --noprofile --force >/dev/null 2>&1)
   rm -rf "$tmp_acme"
   [ -x "$ACME_HOME/acme.sh" ] && return 0
   return 1
@@ -1302,6 +1346,10 @@ menu_domain_cert() {
           continue
         fi
         open_firewall_port 80 tcp
+        local had_valid_cert=0
+        if [ -s "$DOMAIN_CERT_DIR/$domain/cert.pem" ] && [ -s "$DOMAIN_CERT_DIR/$domain/key.pem" ]; then
+          had_valid_cert=1
+        fi
         mkdir -p "$DOMAIN_CERT_DIR/$domain"
         "$ACME_HOME/acme.sh" --home "$ACME_HOME" --register-account -m "admin@${domain}" --server letsencrypt >/dev/null 2>&1 || true
         log "正在向 Let's Encrypt 申请证书..."
@@ -1318,8 +1366,12 @@ menu_domain_cert() {
             *) apply_domain_to_all_protos "$domain" ;;
           esac
         else
-          warn "证书签发失败，请确认域名已正确解析到本机公网 IP 且 80 端口未被占用"
-          rm -rf "${DOMAIN_CERT_DIR:?}/${domain}"
+          if [ "$had_valid_cert" = "1" ]; then
+            warn "证书更新跳过或未完成，但本地已有有效证书，继续保留使用"
+          else
+            warn "证书签发失败，请确认域名已正确解析到本机公网 IP 且 80 端口未被占用"
+            rm -rf "${DOMAIN_CERT_DIR:?}/${domain}"
+          fi
         fi
         press_any_key
         ;;
@@ -1540,7 +1592,7 @@ menu_outbound() {
   read -p "请输入选项 [0-6]: " o_opt
   case "$o_opt" in
     1|2)
-      local proto="socks"
+      local proto="socks" p_host p_port p_user p_pass=""
       [ "$o_opt" = "2" ] && proto="http"
       read -p "代理服务器 IP/域名: " p_host
       p_host="$(printf '%s' "$p_host" | tr -d '[:space:]')"
@@ -1549,14 +1601,13 @@ menu_outbound() {
         press_any_key
         return
       fi
-      p_port="$(prompt_port "代理端口: " "")"
+      p_port="$(prompt_remote_port "代理端口: " "")"
       if [ -z "$p_port" ]; then
         warn "代理端口不能为空"
         press_any_key
         return
       fi
       read -p "用户名 (留空无认证): " p_user
-      local p_pass=""
       if [ -n "$p_user" ]; then
         read -s -p "密码: " p_pass
         echo ""
@@ -1579,6 +1630,7 @@ EOF
       ;;
     3)
       echo -e "${CYAN}提示: TURN 出口将由配套组件 turn2socks 进行本地转接${RESET}"
+      local t_host t_port t_user t_pass="" t_lport
       read -p "TURN 服务器地址: " t_host
       t_host="$(printf '%s' "$t_host" | tr -d '[:space:]')"
       if [ -z "$t_host" ] || [[ "$t_host" =~ [\"\\\'\<\>\;\&] ]]; then
@@ -1586,14 +1638,13 @@ EOF
         press_any_key
         return
       fi
-      t_port="$(prompt_port "TURN 服务器端口 [默认 3478]: " "3478")"
+      t_port="$(prompt_remote_port "TURN 服务器端口 [默认 3478]: " "3478")"
       if [ -z "$t_port" ]; then
         warn "TURN 端口不能为空"
         press_any_key
         return
       fi
       read -p "用户名 (留空无认证): " t_user
-      local t_pass=""
       if [ -n "$t_user" ]; then
         read -s -p "密码: " t_pass
         echo ""
@@ -1964,9 +2015,9 @@ EOF
         "address": ['"$addr_arr"'],
         "peers": [{
           "publicKey": "'"$w_peer"'",
-          "endpoint": "'"$w_end"'",
-          "reserved": ['"$w_res"']
-        }]
+          "endpoint": "'"$w_end"'"
+        }],
+        "reserved": ['"$w_res"']
       }
     }'
 
@@ -2401,7 +2452,7 @@ EOF
           "fingerprint": "chrome",
           "serverName": "${reality_domain:-www.iij.ad.jp}",
           "publicKey": "${reality_pub}",
-          "shortId": ""
+          "shortId": "${reality_sid}"
         }
       }
     },
@@ -2429,6 +2480,106 @@ rotate_log_if_needed() {
   fi
 }
 
+start_xray() {
+  stop_pid_file "$PID_FILE" "$XRAY_BIN"
+  "$XRAY_BIN" run -config "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+}
+
+start_cloudflared() {
+  [ "$(get_val DISABLE_ARGO)" = "true" ] && return 0
+  [ -x "$CF_BIN" ] || return 0
+  stop_pid_file "$CF_PID" "$CF_BIN"
+  local argo_domain argo_auth argo_proto
+  argo_domain="$(get_val ARGO_DOMAIN)"
+  argo_auth="$(get_val ARGO_AUTH)"
+  argo_proto="$(get_val ARGO_PROTOCOL "http2")"
+  local cf_args=("tunnel" "--edge-ip-version" "auto" "--no-autoupdate" "--protocol" "$argo_proto")
+
+  if [ -n "$argo_domain" ] && [ -n "$argo_auth" ]; then
+    cf_args+=("run")
+    TUNNEL_TOKEN="$argo_auth" "$CF_BIN" "${cf_args[@]}" >> "$CF_LOG" 2>&1 &
+    echo $! > "$CF_PID"
+    log "Cloudflare 固定隧道已启动 (${argo_domain})"
+    generate_sub
+  else
+    set_val ARGO_DOMAIN ""
+    > "$CF_LOG" 2>/dev/null || true
+    cf_args+=("--url" "http://127.0.0.1:8001")
+    "$CF_BIN" "${cf_args[@]}" >> "$CF_LOG" 2>&1 &
+    echo $! > "$CF_PID"
+    log "Cloudflare 临时隧道正在建立连接..."
+    (
+      local count=0 new_host=""
+      while [ $count -lt 30 ]; do
+        new_host="$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | grep -v 'api\.trycloudflare\.com' | tail -n 1 | sed 's|https://||')"
+        [ -n "$new_host" ] && break
+        sleep 1
+        count=$((count + 1))
+      done
+      if [ -n "$new_host" ] && [ "$new_host" != "$(get_val ARGO_DOMAIN)" ]; then
+        set_val ARGO_DOMAIN "$new_host"
+        log "Cloudflare 临时域名已分配: ${GREEN}https://${new_host}${RESET}"
+        generate_sub >/dev/null 2>&1 || true
+      fi
+    ) &
+  fi
+}
+
+start_komari() {
+  local km_dom km_tok
+  km_dom="$(get_val KOMARI_DOMAIN)"
+  km_tok="$(get_val KOMARI_TOKEN)"
+  if [ -n "$km_dom" ] && [ -n "$km_tok" ] && [ -x "$KM_BIN" ]; then
+    stop_pid_file "$KM_PID" "$KM_BIN"
+    case "$km_dom" in
+      http://*|https://*) ;;
+      *) km_dom="https://${km_dom}" ;;
+    esac
+    local km_conf="$STATE_DIR/komari.json"
+    cat > "$km_conf" << EOF
+{
+  "endpoint": "${km_dom}",
+  "token": "${km_tok}",
+  "disable_web_ssh": true,
+  "disable_auto_update": true
+}
+EOF
+    chmod 600 "$km_conf"
+    AGENT_ENDPOINT="$km_dom" AGENT_TOKEN="$km_tok" "$KM_BIN" --disable-web-ssh --disable-auto-update --config "$km_conf" >> "$KM_LOG" 2>&1 &
+    echo $! > "$KM_PID"
+    log "Komari 监控探针已启动 (已禁用远程命令执行与自动更新)"
+  fi
+}
+
+stop_pid_file() {
+  local p_file="$1" expected_bin="${2:-}"
+  if [ -f "$p_file" ]; then
+    local p
+    p="$(cat "$p_file" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+      if [ -n "$expected_bin" ] && [ -d "/proc/$p" ]; then
+        local exe_target
+        exe_target="$(readlink -f "/proc/$p/exe" 2>/dev/null || true)"
+        if [ -n "$exe_target" ] && [ "$exe_target" != "$expected_bin" ]; then
+          rm -f "$p_file" 2>/dev/null || true
+          return 0
+        fi
+      fi
+      kill "$p" 2>/dev/null || true
+      local _t=0
+      while kill -0 "$p" 2>/dev/null && [ $_t -lt 5 ]; do
+        sleep 0.5
+        _t=$((_t + 1))
+      done
+      if kill -0 "$p" 2>/dev/null; then
+        kill -9 "$p" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$p_file" 2>/dev/null || true
+  fi
+}
+
 # ── 14. 服务守护、运行与进程调度 ───────────────────────────────────────────────
 do_run() {
   echo $$ > "$RUN_PID"
@@ -2452,89 +2603,20 @@ do_run() {
     start_turn2socks || true
   fi
 
-  stop_pid_file "$PID_FILE"
-  "$XRAY_BIN" run -config "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
-  echo $! > "$PID_FILE"
-  log "Xray 核心已启动 (PID: $(cat "$PID_FILE"))"
-
-  # 启动 Cloudflared (Argo)
-  if [ "$(get_val DISABLE_ARGO)" != "true" ] && [ -x "$CF_BIN" ]; then
-    stop_pid_file "$CF_PID"
-    local argo_domain argo_auth argo_proto
-    argo_domain="$(get_val ARGO_DOMAIN)"
-    argo_auth="$(get_val ARGO_AUTH)"
-    argo_proto="$(get_val ARGO_PROTOCOL "http2")"
-    local cf_args=("tunnel" "--edge-ip-version" "auto" "--no-autoupdate" "--protocol" "$argo_proto")
-
-    if [ -n "$argo_domain" ] && [ -n "$argo_auth" ]; then
-      cf_args+=("run")
-      TUNNEL_TOKEN="$argo_auth" "$CF_BIN" "${cf_args[@]}" > "$CF_LOG" 2>&1 &
-      echo $! > "$CF_PID"
-      log "Cloudflare 固定隧道已启动 (${argo_domain})"
-      generate_sub
-    else
-      set_val ARGO_DOMAIN ""
-      > "$CF_LOG" 2>/dev/null || true
-      cf_args+=("--url" "http://127.0.0.1:8001")
-      "$CF_BIN" "${cf_args[@]}" > "$CF_LOG" 2>&1 &
-      echo $! > "$CF_PID"
-      log "Cloudflare 临时隧道正在建立连接..."
-      # 捕获分配的 trycloudflare 临时域名 (排除 api.trycloudflare.com)
-      local count=0 new_host=""
-      while [ $count -lt 30 ]; do
-        new_host="$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | grep -v 'api\.trycloudflare\.com' | tail -n 1 | sed 's|https://||')"
-        [ -n "$new_host" ] && break
-        sleep 1
-        count=$((count + 1))
-      done
-      if [ -n "$new_host" ]; then
-        set_val ARGO_DOMAIN "$new_host"
-        log "临时域名已成功分配: ${GREEN}https://${new_host}${RESET}"
-        generate_sub
-      fi
-    fi
-  fi
-
-  # 启动 Komari 探针 (禁用 Web-SSH/RCE 与自动更新，收紧 root 攻击面)
-  local km_dom km_tok
-  km_dom="$(get_val KOMARI_DOMAIN)"
-  km_tok="$(get_val KOMARI_TOKEN)"
-  if [ -n "$km_dom" ] && [ -n "$km_tok" ] && [ -x "$KM_BIN" ]; then
-    stop_pid_file "$KM_PID"
-    case "$km_dom" in
-      http://*|https://*) ;;
-      *) km_dom="https://${km_dom}" ;;
-    esac
-    local km_conf="$STATE_DIR/komari.json"
-    cat > "$km_conf" << EOF
-{
-  "endpoint": "${km_dom}",
-  "token": "${km_tok}",
-  "disable_web_ssh": true,
-  "disable_auto_update": true
-}
-EOF
-    chmod 600 "$km_conf"
-    AGENT_ENDPOINT="$km_dom" AGENT_TOKEN="$km_tok" "$KM_BIN" --disable-web-ssh --disable-auto-update --config "$km_conf" > "$KM_LOG" 2>&1 &
-    echo $! > "$KM_PID"
-    log "Komari 监控探针已启动 (已禁用远程命令执行与自动更新)"
-  fi
-
+  start_xray
+  log "Xray 核心已启动 (PID: $(cat "$PID_FILE" 2>/dev/null || echo unknown))"
+  start_cloudflared
+  start_komari
   generate_sub
   log "所有服务已部署就绪，订阅链接已写入 $SUB_FILE"
 
   # 看门狗进程全组件守护
   while true; do
-    local is_alive=0
-    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
-      is_alive=1
-    elif command -v pgrep >/dev/null 2>&1 && pgrep -f "$BIN_DIR/xray" >/dev/null 2>&1; then
-      is_alive=1
-    fi
-    if [ "$is_alive" = "0" ]; then
-      warn "检测到 Xray 核心意外退出，正在自动拉起守护..."
-      "$XRAY_BIN" run -config "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
-      echo $! > "$PID_FILE"
+    if [ ! -f "$PID_FILE" ] || ! kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+      if ! (command -v pgrep >/dev/null 2>&1 && pgrep -f "$BIN_DIR/xray" >/dev/null 2>&1); then
+        warn "检测到 Xray 核心意外退出，正在自动拉起守护..."
+        start_xray
+      fi
     fi
 
     # 守护 turn2socks
@@ -2549,35 +2631,7 @@ EOF
     if [ "$(get_val DISABLE_ARGO)" != "true" ] && [ -x "$CF_BIN" ]; then
       if [ -f "$CF_PID" ] && ! kill -0 "$(cat "$CF_PID" 2>/dev/null)" 2>/dev/null; then
         warn "检测到 Cloudflared Argo 进程退出，正在自动拉起守护..."
-        local a_dom a_auth a_proto
-        a_dom="$(get_val ARGO_DOMAIN)"
-        a_auth="$(get_val ARGO_AUTH)"
-        a_proto="$(get_val ARGO_PROTOCOL "http2")"
-        local a_args=("tunnel" "--edge-ip-version" "auto" "--no-autoupdate" "--protocol" "$a_proto")
-        if [ -n "$a_dom" ] && [ -n "$a_auth" ]; then
-          a_args+=("run")
-          TUNNEL_TOKEN="$a_auth" "$CF_BIN" "${a_args[@]}" >> "$CF_LOG" 2>&1 &
-          echo $! > "$CF_PID"
-        else
-          a_args+=("--url" "http://127.0.0.1:8001")
-          > "$CF_LOG" 2>/dev/null || true
-          "$CF_BIN" "${a_args[@]}" >> "$CF_LOG" 2>&1 &
-          echo $! > "$CF_PID"
-          (
-            sleep 3
-            local nh="" cnt=0
-            while [ $cnt -lt 30 ]; do
-              nh="$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | grep -v 'api\.trycloudflare\.com' | tail -n 1 | sed 's|https://||')"
-              [ -n "$nh" ] && break
-              sleep 1
-              cnt=$((cnt + 1))
-            done
-            if [ -n "$nh" ] && [ "$nh" != "$(get_val ARGO_DOMAIN)" ]; then
-              set_val ARGO_DOMAIN "$nh"
-              generate_sub >/dev/null 2>&1 || true
-            fi
-          ) &
-        fi
+        start_cloudflared
       fi
     fi
 
@@ -2585,25 +2639,7 @@ EOF
     if [ -n "$(get_val KOMARI_DOMAIN)" ] && [ -n "$(get_val KOMARI_TOKEN)" ] && [ -x "$KM_BIN" ]; then
       if [ -f "$KM_PID" ] && ! kill -0 "$(cat "$KM_PID" 2>/dev/null)" 2>/dev/null; then
         warn "检测到 Komari 探针退出，正在自动拉起守护..."
-        local kd kt
-        kd="$(get_val KOMARI_DOMAIN)"
-        kt="$(get_val KOMARI_TOKEN)"
-        case "$kd" in
-          http://*|https://*) ;;
-          *) kd="https://${kd}" ;;
-        esac
-        local km_conf="$STATE_DIR/komari.json"
-        cat > "$km_conf" << EOF
-{
-  "endpoint": "${kd}",
-  "token": "${kt}",
-  "disable_web_ssh": true,
-  "disable_auto_update": true
-}
-EOF
-        chmod 600 "$km_conf"
-        AGENT_ENDPOINT="$kd" AGENT_TOKEN="$kt" "$KM_BIN" --disable-web-ssh --disable-auto-update --config "$km_conf" >> "$KM_LOG" 2>&1 &
-        echo $! > "$KM_PID"
+        start_komari
       fi
     fi
 
@@ -2617,32 +2653,14 @@ EOF
   done
 }
 
-stop_pid_file() {
-  local p_file="$1"
-  if [ -f "$p_file" ]; then
-    local p
-    p="$(cat "$p_file" 2>/dev/null | tr -d '[:space:]')"
-    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
-      kill "$p" 2>/dev/null || true
-      local _t=0
-      while kill -0 "$p" 2>/dev/null && [ $_t -lt 5 ]; do
-        sleep 0.5
-        _t=$((_t + 1))
-      done
-      kill -9 "$p" 2>/dev/null || true
-    fi
-    rm -f "$p_file" 2>/dev/null || true
-  fi
-}
-
 do_stop() {
   if command -v systemctl >/dev/null 2>&1 && systemctl is-active "$SVC_NAME" >/dev/null 2>&1; then
     systemctl stop "$SVC_NAME" 2>/dev/null || true
   fi
   stop_pid_file "$RUN_PID"
-  stop_pid_file "$PID_FILE"
-  stop_pid_file "$CF_PID"
-  stop_pid_file "$KM_PID"
+  stop_pid_file "$PID_FILE" "$XRAY_BIN"
+  stop_pid_file "$CF_PID" "$CF_BIN"
+  stop_pid_file "$KM_PID" "$KM_BIN"
   stop_turn2socks 2>/dev/null || true
   pkill -f "$BIN_DIR/xray" 2>/dev/null || true
   pkill -f "$BIN_DIR/cloudflared" 2>/dev/null || true
@@ -2667,10 +2685,11 @@ do_restart() {
 # ── 15. Systemd 守护单元与全局快捷指令 ─────────────────────────────────────────
 setup_systemd() {
   if [ "$(id -u)" != "0" ]; then
-    warn "非 root 用户，跳过全局 systemd 服务注册"
+    warn "非 root 用户，跳过全局开机自启服务注册"
     return
   fi
-  cat > "/etc/systemd/system/${SVC_NAME}.service" << EOF
+  if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+    cat > "/etc/systemd/system/${SVC_NAME}.service" << EOF
 [Unit]
 Description=Xray Universal Proxy Engine
 After=network.target nss-lookup.target
@@ -2691,9 +2710,19 @@ ReadWritePaths=${APP_DIR}
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable "${SVC_NAME}" >/dev/null 2>&1 || true
-  log "Systemd 系统级服务 (${SVC_NAME}.service) 注册完成"
+    systemctl daemon-reload
+    systemctl enable "${SVC_NAME}" >/dev/null 2>&1 || true
+    log "Systemd 系统级服务 (${SVC_NAME}.service) 注册完成"
+  else
+    # 针对 Alpine (OpenRC) 或无 systemd 环境，通过 crontab 注册 @reboot 自启守护
+    if command -v crontab >/dev/null 2>&1; then
+      ensure_cron || true
+      if ! crontab -l 2>/dev/null | grep -q "${APP_DIR}/xray.sh run"; then
+        (crontab -l 2>/dev/null; echo "@reboot /bin/bash ${APP_DIR}/xray.sh run >/dev/null 2>&1 &") | crontab - 2>/dev/null || true
+      fi
+      log "检测到无 systemd 环境，已通过 crontab (@reboot) 注册开机自启"
+    fi
+  fi
 }
 
 setup_shortcuts() {
@@ -2952,12 +2981,10 @@ do_install() {
     echo ""
     echo -e "${YELLOW}--- 直连协议端口分配 (默认自动探测 10000+ 闲置高位端口) ---${RESET}"
     rm -f "$USED_PORTS_FILE"
-    local rec_r rec_xh rec_ss rec_s5 rec_tr
+    local rec_r rec_xh rec_ss
     rec_r="$(get_random_high_port)"
     rec_xh="$(get_random_high_port)"
     rec_ss="$(get_random_high_port)"
-    rec_s5="$(get_random_high_port)"
-    rec_tr="$(get_random_high_port)"
 
     local chosen_ports=""
     in_reality_port="$(prompt_port "Reality TCP 端口 [默认推荐高位 ${rec_r}，填 0 关闭]: " "$rec_r" "$chosen_ports")"
@@ -3029,8 +3056,8 @@ do_install() {
   open_firewall_port "$in_s5_port" both
 
   log "正在准备组件与二进制核心..."
-  ensure_binaries
-  generate_config
+  ensure_binaries || { warn "二进制安装准备失败，请检查网络或架构支持"; press_any_key; return 1; }
+  generate_config || { warn "初始配置生成失败，请检查日志排查"; press_any_key; return 1; }
   setup_systemd
   setup_shortcuts
   touch "$APP_DIR/.xray_installed" 2>/dev/null || true
@@ -3626,18 +3653,10 @@ case "${1:-}" in
   rollback) do_rollback ;;
   del)      do_uninstall ;;
   *)
-    case "$(basename "$0")" in
-      xr-sub|xray-sub)           show_sub ;;
-      xr-log|xray-log)           do_log ;;
-      xr-del|xray-del)           do_uninstall ;;
-      xr-rollback|xray-rollback) do_rollback ;;
-      *)
-        if [ ! -x "$XRAY_BIN" ]; then
-          do_install
-        else
-          do_menu
-        fi
-        ;;
-    esac
+    if [ ! -x "$XRAY_BIN" ]; then
+      do_install
+    else
+      do_menu
+    fi
     ;;
 esac
