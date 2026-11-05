@@ -93,6 +93,7 @@ CF_BIN="$BIN_DIR/cloudflared"
 KM_BIN="$BIN_DIR/komari-agent"
 TURN2SOCKS_BIN="$BIN_DIR/turn2socks"
 ACME_HOME="$STATE_DIR/acme"
+DEFAULT_XRAY_VER="v26.10.31"
 
 mkdir -p "$APP_DIR" "$STATE_DIR" "$BIN_DIR" "$DOMAIN_CERT_DIR" 2>/dev/null || true
 chmod 700 "$APP_DIR" "$STATE_DIR" "$BIN_DIR" "$DOMAIN_CERT_DIR" 2>/dev/null || true
@@ -375,7 +376,7 @@ is_valid_elf() {
 }
 
 download_xray() {
-  local target_ver="${1:-latest}"
+  local target_ver="${1:-$DEFAULT_XRAY_VER}"
   log "正在下载 Xray-core (${target_ver})..."
   local xarch url tmpzip
   xarch="$(detect_arch)"
@@ -1612,16 +1613,16 @@ EOF
 
 prompt_route_mode() {
   echo -e "${GRAY}------------------------------------------------------------${RESET}" >&2
-  echo -e "请选择分流模式:" >&2
-  echo -e "${WHITE}1. 智能分流 (推荐: 仅 Netflix/ChatGPT/Gemini/流媒体走出口代理，其余直连)${RESET}" >&2
-  echo -e "${WHITE}2. 全局代理 (所有出站流量统一走出口代理)${RESET}" >&2
+  echo -e "分流模式:" >&2
+  echo -e "${WHITE}1. 全局代理${RESET}" >&2
+  echo -e "${WHITE}2. 智能分流${RESET}" >&2
   echo -e "${GRAY}------------------------------------------------------------${RESET}" >&2
   local rm_opt
   read -p "选项 [默认 1]: " rm_opt
   if [ "${rm_opt:-1}" = "2" ]; then
-    printf 'global'
-  else
     printf 'split'
+  else
+    printf 'global'
   fi
 }
 
@@ -2882,14 +2883,6 @@ exec /bin/bash \"\$TARGET\" ${subcmd} \"\$@\""
 
   create_shortcut_bin "xr" ""
   create_shortcut_bin "xray" ""
-  create_shortcut_bin "xr-sub" "sub"
-  create_shortcut_bin "xr-log" "log"
-  create_shortcut_bin "xr-del" "del"
-  create_shortcut_bin "xr-rollback" "rollback"
-  create_shortcut_bin "xray-sub" "sub"
-  create_shortcut_bin "xray-log" "log"
-  create_shortcut_bin "xray-del" "del"
-  create_shortcut_bin "xray-rollback" "rollback"
 
   # 3. 环境变量 PATH 安全补充（绝不新建破坏 Debian/Ubuntu 机制的 ~/.bash_profile）
   if [ -f "$HOME_DIR/.bashrc" ] && ! grep -q "/usr/local/bin" "$HOME_DIR/.bashrc" 2>/dev/null; then
@@ -2956,17 +2949,15 @@ do_rollback() {
 
 menu_update() {
   clear
-  echo -e "${GREEN}==================== 组件在线升级 ====================${RESET}"
+  echo -e "${GREEN}==================== 在线升级 ====================${RESET}"
   local cur_xray="未安装"
   [ -x "$XRAY_BIN" ] && cur_xray="$("$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}')"
-  echo -e "当前 Xray 核心版本: ${CYAN}${cur_xray}${RESET}"
+  echo -e "当前核心版本: ${CYAN}${cur_xray}${RESET}"
   echo -e "${GREEN}----------------------------------------------------${RESET}"
   echo -e "${WHITE} 1. 升级 Xray 核心${RESET}"
-  echo -e "${WHITE} 2. 升级 Argo 引擎${RESET}"
-  echo -e "${WHITE} 3. 升级 Komari 探针${RESET}"
-  echo -e "${WHITE} 4. 更新管理脚本${RESET}"
+  echo -e "${WHITE} 2. 更新管理脚本${RESET}"
   if [ -f "$APP_DIR/xray.sh.bak" ]; then
-    echo -e "${WHITE} 5. 回退管理脚本 (至上一备份版本)${RESET}"
+    echo -e "${WHITE} 3. 回退管理脚本${RESET}"
   fi
   echo -e "${WHITE} 0. 返回面板${RESET}"
   echo -e "${GREEN}----------------------------------------------------${RESET}"
@@ -2979,16 +2970,8 @@ menu_update() {
       fi
       press_any_key
       ;;
-    2)
-      download_cloudflared && { log "Cloudflared 已更新！"; do_restart; }
-      press_any_key
-      ;;
+    2) do_update_script ;;
     3)
-      download_komari && { log "Komari-agent 已更新！"; do_restart; }
-      press_any_key
-      ;;
-    4) do_update_script ;;
-    5)
       if [ -f "$APP_DIR/xray.sh.bak" ]; then
         do_rollback
       else
@@ -3192,8 +3175,8 @@ do_install() {
   fi
 
   generate_sub
-  log "恭喜！Xray Universal Proxy Engine 部署成功！"
-  show_sub
+  log "Xray 部署成功！正在进入控制面板..."
+  sleep 1
 }
 
 # ── 18. 日志查看器 (do_log) ──────────────────────────────────────────────────
@@ -3275,15 +3258,13 @@ show_sub() {
     echo -e "${WHITE} 2. 查看 Base64 订阅文本${RESET}"
     echo -e "${WHITE} 3. 查看 Clash Meta 规则配置${RESET}"
     echo -e "${WHITE} 4. 查看 Xray 客户端 JSON 配置${RESET}"
-    echo -e "${WHITE} 5. 导出配置至本地文本文件${RESET}"
-    echo -e "${YELLOW} 提示: 若连接超时，请务必在云服务器控制台安全组放行上述端口 (TCP/UDP)${RESET}"
     echo -e "${WHITE} 0. 返回面板${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
-    read -p "请输入选项 [0-5]: " s_opt
+    read -p "请输入选项 [0-4]: " s_opt
     case "$s_opt" in
       1)
         clear
-        echo -e "${GREEN}=== 明文节点链接 (直接导入客户端) ===${RESET}\n"
+        echo -e "${GREEN}=== 明文节点链接 ===${RESET}\n"
         [ -f "$SUB_RAW_FILE" ] && cat "$SUB_RAW_FILE"
         if [ -f "$TG_S5_FILE" ]; then
           echo -e "\n${CYAN}=== Telegram 专属一键代理链接 ===${RESET}"
@@ -3293,7 +3274,7 @@ show_sub() {
         ;;
       2)
         clear
-        echo -e "${GREEN}=== Base64 订阅内容 (复制整段内容) ===${RESET}\n"
+        echo -e "${GREEN}=== Base64 订阅内容 ===${RESET}\n"
         [ -f "$SUB_FILE" ] && cat "$SUB_FILE"
         echo -e "\n"
         press_any_key
@@ -3312,25 +3293,6 @@ show_sub() {
         else
           warn "未启用 Reality 直连协议，暂无对应客户端 JSON 配置文件"
         fi
-        press_any_key
-        ;;
-      5)
-        local out_dump="$APP_DIR/all_sub_export.txt"
-        {
-          echo "==================== Xray 节点订阅明细 ===================="
-          [ -f "$SUB_RAW_FILE" ] && cat "$SUB_RAW_FILE"
-          [ -f "$TG_S5_FILE" ] && { echo -e "\n==================== Telegram 代理链接 ===================="; cat "$TG_S5_FILE"; }
-          echo -e "\n==================== Base64 订阅 ===================="
-          [ -f "$SUB_FILE" ] && cat "$SUB_FILE"
-          echo -e "\n==================== Clash Meta 配置 ===================="
-          [ -f "$CLASH_META_FILE" ] && cat "$CLASH_META_FILE"
-          if [ -f "$XRAY_CLIENT_FILE" ]; then
-            echo -e "\n==================== Xray 客户端 JSON 配置 ===================="
-            cat "$XRAY_CLIENT_FILE"
-          fi
-        } > "$out_dump"
-        chmod 600 "$out_dump" 2>/dev/null || true
-        log "已导出完整订阅配置文件至: ${CYAN}${out_dump}${RESET}"
         press_any_key
         ;;
       0) return ;;
@@ -3375,194 +3337,266 @@ menu_config() {
       reality_display="未启用"
     fi
 
-    echo -e "${GREEN}====================================================${RESET}"
-    echo -e "${WHITE}                    修改参数配置                    ${RESET}"
-    echo -e "${GREEN}----------------------------------------------------${RESET}"
-    echo -e "${WHITE} 1. 用户 UUID           : ${CYAN}${cur_u}${RESET}"
-    echo -e "${WHITE} 2. Reality 端口        : ${CYAN}${reality_display}${RESET}"
-    echo -e "${WHITE} 3. Shadowsocks 端口    : ${CYAN}${cur_sp}${RESET}"
-    echo -e "${WHITE} 4. SOCKS5 协议端口     : ${CYAN}${cur_s5}${RESET}"
-    echo -e "${WHITE} 5. Trojan 协议端口     : ${CYAN}${cur_tp}${RESET}"
-    echo -e "${WHITE} 6. Argo 隧道管理       : ${CYAN}${cur_argo}${RESET}"
-    echo -e "${WHITE} 7. CDN 优选域名        : ${CYAN}${cur_pref}${RESET}"
-    echo -e "${WHITE} 8. Komari 探针         : ${CYAN}${cur_km}${RESET}"
-    echo -e "${WHITE} 9. 全局连接地址        : ${CYAN}${cur_srv}${RESET}"
+    echo -e "${GREEN}==================== 修改配置 ====================${RESET}"
+    echo -e "${WHITE} 1. 用户 UUID     : ${CYAN}${cur_u}${RESET}"
+    echo -e "${WHITE} 2. Reality 端口  : ${CYAN}${reality_display}${RESET}"
+    echo -e "${WHITE} 3. Shadowsocks   : ${CYAN}${cur_sp}${RESET}"
+    echo -e "${WHITE} 4. SOCKS5 端口   : ${CYAN}${cur_s5}${RESET}"
+    echo -e "${WHITE} 5. Trojan 端口   : ${CYAN}${cur_tp}${RESET}"
+    echo -e "${WHITE} 6. Argo 隧道     : ${CYAN}${cur_argo}${RESET}"
+    echo -e "${WHITE} 7. CDN 优选      : ${CYAN}${cur_pref}${RESET}"
+    echo -e "${WHITE} 8. Komari 探针   : ${CYAN}${cur_km}${RESET}"
+    echo -e "${WHITE} 9. 连接地址      : ${CYAN}${cur_srv}${RESET}"
     echo -e "${WHITE} 0. 返回面板${RESET}"
-    echo -e "${GREEN}====================================================${RESET}"
+    echo -e "${GREEN}==================================================${RESET}"
     read -p "请输入修改项 [0-9]: " c_opt
     case "$c_opt" in
       1)
-        read -p "请输入新 UUID [留空自动生成]: " new_u
-        if [ -n "$new_u" ]; then
-          if ! is_valid_uuid "$new_u"; then
-            warn "输入的 UUID 格式不合法 (必须符合 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx 规范)"
-            press_any_key
-            continue
-          fi
-        else
+        read -p "新 UUID [回车保持原值, g 重新生成]: " new_u
+        if [ -z "$new_u" ]; then
+          log "保持原 UUID 不变"
+          sleep 0.5
+          continue
+        fi
+        if [ "$new_u" = "g" ] || [ "$new_u" = "G" ]; then
           if [ -x "$XRAY_BIN" ]; then
             new_u="$("$XRAY_BIN" uuid 2>/dev/null | tr -d '[:space:]')"
           fi
           [ -z "$new_u" ] && [ -r /proc/sys/kernel/random/uuid ] && new_u="$(cat /proc/sys/kernel/random/uuid | tr -d '[:space:]')"
           [ -z "$new_u" ] && command -v uuidgen >/dev/null 2>&1 && new_u="$(uuidgen | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-        fi
-        set_val UUID "$new_u"
-        echo "$new_u" > "$UUID_FILE"
-        config_modified=1
-        log "UUID 已更新为: ${CYAN}${new_u}${GREEN}"
-        sleep 1
-        ;;
-      2)
-        local cur_other_p="$cur_sp $cur_s5 $cur_tp"
-        new_rp="$(prompt_port "Reality TCP 端口 [默认 ${cur_rp}，填 0 关闭]: " "$cur_rp" "$cur_other_p")"
-        new_xp="$(prompt_port "Reality xhttp 端口 [默认 ${cur_xp}，填 0 关闭]: " "$cur_xp" "$new_rp $cur_other_p")"
-
-        set_val REALITY_PORT "$new_rp"
-        set_val XHTTP_PORT "$new_xp"
-
-        if [ -n "$new_rp" ] || [ -n "$new_xp" ]; then
-          read -p "Reality 伪装域名 [默认 ${cur_rd}]: " new_rd
-          new_rd="${new_rd:-$cur_rd}"
-          new_rd="$(printf '%s' "$new_rd" | tr -d '[:space:]')"
-          if ! validate_domain_name "$new_rd"; then
-            warn "域名格式非法，包含非法字符"
-            press_any_key
-            continue
-          fi
-          set_val REALITY_DOMAIN "${new_rd:-www.iij.ad.jp}"
-        fi
-        [ -n "$cur_rp" ] && [ "$cur_rp" != "未启用" ] && [ "$cur_rp" != "$new_rp" ] && close_firewall_port "$cur_rp" tcp
-        [ -n "$cur_xp" ] && [ "$cur_xp" != "未启用" ] && [ "$cur_xp" != "$new_xp" ] && close_firewall_port "$cur_xp" tcp
-        [ -n "$new_rp" ] && open_firewall_port "$new_rp" tcp
-        [ -n "$new_xp" ] && open_firewall_port "$new_xp" tcp
-        config_modified=1
-        log "Reality 配置已更新 (公私钥保持稳定)"
-        sleep 1
-        ;;
-      3)
-        local cur_other_p="$cur_rp $cur_xp $cur_s5 $cur_tp"
-        new_sp="$(prompt_port "Shadowsocks 端口 [默认 ${cur_sp}，填 0 关闭]: " "$cur_sp" "$cur_other_p")"
-        [ -n "$cur_sp" ] && [ "$cur_sp" != "未启用" ] && [ "$cur_sp" != "$new_sp" ] && close_firewall_port "$cur_sp" both
-        set_val SS_PORT "$new_sp"
-        if [ -n "$new_sp" ]; then
-          read -s -p "Shadowsocks 密码 [留空保持原值/随机生成]: " new_pass
-          echo ""
-          if [ -n "$new_pass" ]; then
-            new_pass="$(get_ss2022_key "$new_pass")"
-            set_val SS_PASS "$new_pass"
-          else
-            # 若之前未设置过密码（如自定义安装时关闭，后在菜单开启且留空），确保生成并持久化有效密码
-            get_ss_pass >/dev/null
-          fi
-          open_firewall_port "$new_sp" both
-        fi
-        config_modified=1
-        log "Shadowsocks 配置已更新"
-        sleep 1
-        ;;
-      4)
-        local cur_other_p="$cur_rp $cur_xp $cur_sp $cur_tp"
-        new_s5="$(prompt_port "SOCKS5 协议端口 [默认 ${cur_s5}，填 0 关闭]: " "$cur_s5" "$cur_other_p")"
-        [ -n "$cur_s5" ] && [ "$cur_s5" != "未启用" ] && [ "$cur_s5" != "$new_s5" ] && close_firewall_port "$cur_s5" both
-        set_val S5_PORT "$new_s5"
-        if [ -n "$new_s5" ]; then
-          local cur_s5_u cur_s5_p
-          read -r cur_s5_u cur_s5_p <<< "$(get_socks5_creds)"
-          read -p "SOCKS5 用户名 [默认 ${cur_s5_u}]: " new_s5_u
-          new_s5_u="$(printf '%s' "${new_s5_u:-$cur_s5_u}" | tr -d '[:space:]"' | tr -d "'")"
-          set_val S5_USER "$new_s5_u"
-          read -s -p "SOCKS5 密码 [默认 ${cur_s5_p}]: " new_s5_p
-          echo ""
-          new_s5_p="$(printf '%s' "${new_s5_p:-$cur_s5_p}" | tr -d '[:space:]"' | tr -d "'")"
-          set_val S5_PASS "$new_s5_p"
-          open_firewall_port "$new_s5" both
-        fi
-        config_modified=1
-        log "SOCKS5 配置已更新"
-        sleep 1
-        ;;
-      5)
-        local cur_other_p="$cur_rp $cur_xp $cur_sp $cur_s5"
-        new_tp="$(prompt_port "Trojan 协议端口 [默认 ${cur_tp}，填 0 关闭]: " "$cur_tp" "$cur_other_p")"
-        [ -n "$cur_tp" ] && [ "$cur_tp" != "未启用" ] && [ "$cur_tp" != "$new_tp" ] && close_firewall_port "$cur_tp" tcp
-        set_val TROJAN_PORT "$new_tp"
-        if [ -n "$new_tp" ]; then
-          open_firewall_port "$new_tp" tcp
-          local cur_tr_p
-          cur_tr_p="$(get_trojan_pass)"
-          read -s -p "Trojan 密码 [留空保持原值/自动生成]: " new_tr_p
-          echo ""
-          if [ -n "$new_tr_p" ]; then
-            new_tr_p="$(printf '%s' "$new_tr_p" | tr -d '[:space:]@#/?&:"' | tr -d "'")"
-            set_val TROJAN_PASS "$new_tr_p"
-          fi
-        fi
-        config_modified=1
-        log "Trojan 配置已更新"
-        sleep 1
-        ;;
-      6)
-        read -p "是否禁用 Argo 隧道？[y/N，默认 N]: " dis_a
-        case "$dis_a" in
-          y|Y) set_val DISABLE_ARGO "true" ;;
-          *)
-            set_val DISABLE_ARGO "false"
-            read -p "Argo 固定域名 [留空使用临时隧道]: " new_ad
-            new_ad="$(printf '%s' "$new_ad" | tr -d '[:space:]')"
-            set_val ARGO_DOMAIN "$new_ad"
-            if [ -n "$new_ad" ]; then
-              read -s -p "Argo Tunnel Token: " new_at
-              echo ""
-              new_at="$(printf '%s' "$new_at" | tr -d '[:space:]')"
-              set_val ARGO_AUTH "$new_at"
-            fi
-            ;;
-        esac
-        config_modified=1
-        log "Argo 隧道设置已更新"
-        sleep 1
-        ;;
-      7)
-        read -p "Cloudflare CDN 优选域名/IP [默认 www.visa.com.tw]: " new_pref
-        new_pref="$(printf '%s' "${new_pref:-www.visa.com.tw}" | tr -d '[:space:]')"
-        set_val CF_PREFER_HOST "$new_pref"
-        config_modified=1
-        log "CDN 优选域名已更新"
-        sleep 1
-        ;;
-      8)
-        read -p "Komari 服务端域名 [留空关闭]: " new_kd
-        new_kd="$(printf '%s' "$new_kd" | tr -d '[:space:]')"
-        set_val KOMARI_DOMAIN "$new_kd"
-        if [ -n "$new_kd" ]; then
-          read -s -p "Komari 探针 Token: " new_kt
-          echo ""
-          new_kt="$(printf '%s' "$new_kt" | tr -d '[:space:]')"
-          set_val KOMARI_TOKEN "$new_kt"
-        fi
-        config_modified=1
-        log "Komari 探针配置已更新"
-        sleep 1
-        ;;
-      9)
-        read -p "自定义连接域名/IP [留空恢复自动探测]: " new_dom
-        new_dom="$(printf '%s' "$new_dom" | tr -d '[:space:]')"
-        if [[ "$new_dom" =~ [\"\\\'\<\>\;\&] ]]; then
-          warn "连接地址格式非法"
+        elif ! is_valid_uuid "$new_u"; then
+          warn "UUID 格式不合法"
           press_any_key
           continue
         fi
-        set_val SERVER_DOMAIN "$new_dom"
-        config_modified=1
-        log "连接地址已更新"
-        sleep 1
+        if [ "$new_u" != "$cur_u" ]; then
+          set_val UUID "$new_u"
+          echo "$new_u" > "$UUID_FILE"
+          config_modified=1
+          log "UUID 已更新"
+          sleep 0.5
+        fi
+        ;;
+      2)
+        local cur_other_p="$cur_sp $cur_s5 $cur_tp"
+        new_rp="$(prompt_port "Reality TCP 端口 [当前 ${cur_rp}]: " "$cur_rp" "$cur_other_p")"
+        new_xp="$(prompt_port "Reality xhttp 端口 [当前 ${cur_xp}]: " "$cur_xp" "$new_rp $cur_other_p")"
+
+        local new_rd="$cur_rd"
+        if [ -n "$new_rp" ] || [ -n "$new_xp" ]; then
+          read -p "Reality 伪装域名 [当前 ${cur_rd}]: " in_rd
+          in_rd="$(printf '%s' "$in_rd" | tr -d '[:space:]')"
+          if [ -n "$in_rd" ]; then
+            if ! validate_domain_name "$in_rd"; then
+              warn "域名格式非法"
+              press_any_key
+              continue
+            fi
+            new_rd="$in_rd"
+          fi
+        fi
+        if [ "$new_rp" != "$cur_rp" ] || [ "$new_xp" != "$cur_xp" ] || [ "$new_rd" != "$cur_rd" ]; then
+          set_val REALITY_PORT "$new_rp"
+          set_val XHTTP_PORT "$new_xp"
+          set_val REALITY_DOMAIN "${new_rd:-www.iij.ad.jp}"
+          [ -n "$cur_rp" ] && [ "$cur_rp" != "未启用" ] && [ "$cur_rp" != "$new_rp" ] && close_firewall_port "$cur_rp" tcp
+          [ -n "$cur_xp" ] && [ "$cur_xp" != "未启用" ] && [ "$cur_xp" != "$new_xp" ] && close_firewall_port "$cur_xp" tcp
+          [ -n "$new_rp" ] && open_firewall_port "$new_rp" tcp
+          [ -n "$new_xp" ] && open_firewall_port "$new_xp" tcp
+          config_modified=1
+          log "Reality 配置已更新"
+          sleep 0.5
+        fi
+        ;;
+      3)
+        local cur_other_p="$cur_rp $cur_xp $cur_s5 $cur_tp"
+        new_sp="$(prompt_port "Shadowsocks 端口 [当前 ${cur_sp}]: " "$cur_sp" "$cur_other_p")"
+        local new_pass=""
+        if [ -n "$new_sp" ]; then
+          read -s -p "Shadowsocks 密码 [回车保持原值]: " in_pass
+          echo ""
+          if [ -n "$in_pass" ]; then
+            new_pass="$(get_ss2022_key "$in_pass")"
+          fi
+        fi
+        if [ "$new_sp" != "$cur_sp" ] || [ -n "$new_pass" ]; then
+          [ -n "$cur_sp" ] && [ "$cur_sp" != "未启用" ] && [ "$cur_sp" != "$new_sp" ] && close_firewall_port "$cur_sp" both
+          set_val SS_PORT "$new_sp"
+          [ -n "$new_pass" ] && set_val SS_PASS "$new_pass"
+          [ -n "$new_sp" ] && open_firewall_port "$new_sp" both
+          config_modified=1
+          log "Shadowsocks 已更新"
+          sleep 0.5
+        fi
+        ;;
+      4)
+        local cur_other_p="$cur_rp $cur_xp $cur_sp $cur_tp"
+        new_s5="$(prompt_port "SOCKS5 端口 [当前 ${cur_s5}]: " "$cur_s5" "$cur_other_p")"
+        local new_s5_u="" new_s5_p=""
+        if [ -n "$new_s5" ]; then
+          local cur_s5_u cur_s5_p
+          read -r cur_s5_u cur_s5_p <<< "$(get_socks5_creds)"
+          read -p "SOCKS5 用户名 [当前 ${cur_s5_u}]: " in_s5_u
+          in_s5_u="$(printf '%s' "$in_s5_u" | tr -d '[:space:]"' | tr -d "'")"
+          read -s -p "SOCKS5 密码 [当前已配置，回车保持]: " in_s5_p
+          echo ""
+          in_s5_p="$(printf '%s' "$in_s5_p" | tr -d '[:space:]"' | tr -d "'")"
+          [ -n "$in_s5_u" ] && new_s5_u="$in_s5_u"
+          [ -n "$in_s5_p" ] && new_s5_p="$in_s5_p"
+        fi
+        if [ "$new_s5" != "$cur_s5" ] || [ -n "$new_s5_u" ] || [ -n "$new_s5_p" ]; then
+          [ -n "$cur_s5" ] && [ "$cur_s5" != "未启用" ] && [ "$cur_s5" != "$new_s5" ] && close_firewall_port "$cur_s5" both
+          set_val S5_PORT "$new_s5"
+          [ -n "$new_s5_u" ] && set_val S5_USER "$new_s5_u"
+          [ -n "$new_s5_p" ] && set_val S5_PASS "$new_s5_p"
+          [ -n "$new_s5" ] && open_firewall_port "$new_s5" both
+          config_modified=1
+          log "SOCKS5 已更新"
+          sleep 0.5
+        fi
+        ;;
+      5)
+        local cur_other_p="$cur_rp $cur_xp $cur_sp $cur_s5"
+        new_tp="$(prompt_port "Trojan 端口 [当前 ${cur_tp}]: " "$cur_tp" "$cur_other_p")"
+        local new_tr_p=""
+        if [ -n "$new_tp" ]; then
+          read -s -p "Trojan 密码 [回车保持原值]: " in_tr_p
+          echo ""
+          if [ -n "$in_tr_p" ]; then
+            new_tr_p="$(printf '%s' "$in_tr_p" | tr -d '[:space:]@#/?&:"' | tr -d "'")"
+          fi
+        fi
+        if [ "$new_tp" != "$cur_tp" ] || [ -n "$new_tr_p" ]; then
+          [ -n "$cur_tp" ] && [ "$cur_tp" != "未启用" ] && [ "$cur_tp" != "$new_tp" ] && close_firewall_port "$cur_tp" tcp
+          set_val TROJAN_PORT "$new_tp"
+          [ -n "$new_tr_p" ] && set_val TROJAN_PASS "$new_tr_p"
+          [ -n "$new_tp" ] && open_firewall_port "$new_tp" tcp
+          config_modified=1
+          log "Trojan 已更新"
+          sleep 0.5
+        fi
+        ;;
+      6)
+        clear
+        echo -e "${GREEN}==================== Argo 隧道管理 ====================${RESET}"
+        echo -e "当前模式: ${CYAN}${cur_argo}${RESET}"
+        echo -e "${GREEN}----------------------------------------------------${RESET}"
+        echo -e "${WHITE} 1. 临时隧道${RESET}"
+        echo -e "${WHITE} 2. 固定隧道${RESET}"
+        echo -e "${WHITE} 3. 禁用隧道${RESET}"
+        echo -e "${WHITE} 0. 返回${RESET}"
+        echo -e "${GREEN}----------------------------------------------------${RESET}"
+        read -p "请输入选项 [0-3]: " a_opt
+        case "$a_opt" in
+          1)
+            if [ "$cur_argo" != "临时隧道" ]; then
+              set_val DISABLE_ARGO "false"
+              set_val ARGO_DOMAIN ""
+              set_val ARGO_AUTH ""
+              config_modified=1
+              log "已切换为临时隧道"
+              sleep 0.5
+            fi
+            ;;
+          2)
+            local in_ad in_at
+            read -p "Argo 域名 [回车取消]: " in_ad
+            in_ad="$(printf '%s' "$in_ad" | tr -d '[:space:]')"
+            if [ -z "$in_ad" ]; then
+              log "已取消修改"
+              sleep 0.5
+              continue
+            fi
+            read -s -p "Argo Token [回车取消]: " in_at
+            echo ""
+            in_at="$(printf '%s' "$in_at" | tr -d '[:space:]')"
+            if [ -z "$in_at" ]; then
+              log "已取消修改"
+              sleep 0.5
+              continue
+            fi
+            set_val DISABLE_ARGO "false"
+            set_val ARGO_DOMAIN "$in_ad"
+            set_val ARGO_AUTH "$in_at"
+            config_modified=1
+            log "已配置固定隧道"
+            sleep 0.5
+            ;;
+          3)
+            if [ "$cur_argo" != "禁用" ]; then
+              set_val DISABLE_ARGO "true"
+              config_modified=1
+              log "已禁用 Argo 隧道"
+              sleep 0.5
+            fi
+            ;;
+          0|*) ;;
+        esac
+        ;;
+      7)
+        read -p "CDN 优选地址 [当前 ${cur_pref}]: " in_pref
+        in_pref="$(printf '%s' "$in_pref" | tr -d '[:space:]')"
+        if [ -n "$in_pref" ] && [ "$in_pref" != "$cur_pref" ]; then
+          set_val CF_PREFER_HOST "$in_pref"
+          config_modified=1
+          log "CDN 优选地址已更新"
+          sleep 0.5
+        fi
+        ;;
+      8)
+        read -p "Komari 域名 [当前 ${cur_km}]: " in_kd
+        in_kd="$(printf '%s' "$in_kd" | tr -d '[:space:]')"
+        if [ -n "$in_kd" ]; then
+          read -s -p "Komari Token: " in_kt
+          echo ""
+          in_kt="$(printf '%s' "$in_kt" | tr -d '[:space:]')"
+          set_val KOMARI_DOMAIN "$in_kd"
+          set_val KOMARI_TOKEN "$in_kt"
+          config_modified=1
+          log "Komari 探针已更新"
+          sleep 0.5
+        elif [ "$in_kd" = "0" ]; then
+          set_val KOMARI_DOMAIN ""
+          set_val KOMARI_TOKEN ""
+          config_modified=1
+          log "Komari 探针已关闭"
+          sleep 0.5
+        fi
+        ;;
+      9)
+        read -p "连接地址 [当前 ${cur_srv}]: " in_dom
+        in_dom="$(printf '%s' "$in_dom" | tr -d '[:space:]')"
+        if [ "$in_dom" = "0" ]; then
+          set_val SERVER_DOMAIN ""
+          config_modified=1
+          log "已恢复自动探测"
+          sleep 0.5
+        elif [ -n "$in_dom" ] && [ "$in_dom" != "$cur_srv" ]; then
+          if [[ "$in_dom" =~ [\"\\\'\<\>\;\&] ]]; then
+            warn "地址格式非法"
+            press_any_key
+            continue
+          fi
+          set_val SERVER_DOMAIN "$in_dom"
+          config_modified=1
+          log "连接地址已更新"
+          sleep 0.5
+        fi
         ;;
       0)
         if [ "$config_modified" = "1" ]; then
-          log "配置已变更，正在平滑重启服务生效..."
-          do_restart
-        else
-          log "未作任何更改，直接返回面板"
+          read -p "配置已修改，是否保存并重启服务生效？[Y/n]: " save_c
+          case "$save_c" in
+            n|N)
+              load_env
+              log "已放弃未保存修改，直接返回"
+              sleep 0.5
+              ;;
+            *)
+              log "配置已变更，正在重启服务生效..."
+              do_restart
+              ;;
+          esac
         fi
         return
         ;;
@@ -3773,8 +3807,7 @@ case "${1:-}" in
   *)
     if [ ! -x "$XRAY_BIN" ]; then
       do_install
-    else
-      do_menu
     fi
+    do_menu
     ;;
 esac
