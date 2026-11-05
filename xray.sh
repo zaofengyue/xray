@@ -167,23 +167,20 @@ nat64_enable_temp() {
   [ "$(id -u)" = "0" ] || return 0
   nat64_recover_leftover
 
-  # 优先实际测试连通性：若能正常访问纯 IPv4 站点 (api.github.com) 则无需挂载 NAT64
-  if command -v curl >/dev/null 2>&1; then
-    curl -4 -s --connect-timeout 2 -m 3 https://api.github.com >/dev/null 2>&1 && return 0
-  elif command -v wget >/dev/null 2>&1; then
-    wget -4 -qO- --timeout=3 https://api.github.com >/dev/null 2>&1 && return 0
-  fi
-
+  # 1. 凡是具有系统级 IPv4 默认路由的主机，绝不判定为纯 IPv6，不挂载 NAT64
   local _has_v4=0
   if command -v ip >/dev/null 2>&1; then
     ip -4 route show default 2>/dev/null | grep -q default && _has_v4=1
   elif command -v route >/dev/null 2>&1; then
     route -n 2>/dev/null | grep -q '^0.0.0.0' && _has_v4=1
   fi
-  if [ "$_has_v4" = "1" ]; then
-    if command -v ping >/dev/null 2>&1; then
-      ping -4 -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && return 0
-    fi
+  [ "$_has_v4" = "1" ] && return 0
+
+  # 2. 纯 IPv6 主机：若系统已有可用的 DNS64/NAT64 能直接连通纯 IPv4 站点，则无需临时挂载
+  if command -v curl >/dev/null 2>&1; then
+    curl -s --connect-timeout 2 -m 3 https://api.github.com >/dev/null 2>&1 && return 0
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- --timeout=3 https://api.github.com >/dev/null 2>&1 && return 0
   fi
 
   local _rc="/etc/resolv.conf"
@@ -387,7 +384,7 @@ download_xray() {
     log "Xray 核心 SHA256 安全校验通过 (${act_sha:0:16}...)"
   else
     warn "未能获取 Xray 官方发布哈希或缺少 sha256sum 工具"
-    if [ -t 0 ] || [ -r /dev/tty ]; then
+    if [ -t 0 ] && { : </dev/tty; } 2>/dev/null; then
       read -p "是否在无安全哈希校验下强行继续？[y/N]: " bypass_chk </dev/tty
       case "$bypass_chk" in
         y|Y) warn "已确认跳过 SHA256 完整性校验" ;;
@@ -422,12 +419,14 @@ download_cloudflared() {
   url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${cfarch}"
   download_file "$url" "$CF_BIN" || { warn "下载 cloudflared 失败"; return 1; }
   chmod +x "$CF_BIN"
-  if ! "$CF_BIN" --version >/dev/null 2>&1; then
+  local ver_out
+  ver_out="$("$CF_BIN" --version 2>/dev/null | head -1)"
+  if [[ "$ver_out" != *"cloudflared version"* ]]; then
     rm -f "$CF_BIN"
-    warn "cloudflared 二进制校验失败或无法在当前架构运行"
+    warn "cloudflared 二进制自检失败 (输出异常或无法在当前架构运行)"
     return 1
   fi
-  log "Cloudflared 部署就绪: $("$CF_BIN" --version 2>/dev/null | head -1)"
+  log "Cloudflared 部署就绪: ${ver_out}"
   return 0
 }
 
@@ -438,10 +437,10 @@ download_komari() {
   url="https://github.com/komari-monitoring/komari-agent/releases/latest/download/komari-agent_${kmarch}"
   download_file "$url" "$KM_BIN" || { warn "下载 komari-agent 失败"; return 1; }
   chmod +x "$KM_BIN"
-  if ! "$KM_BIN" --version >/dev/null 2>&1 && ! "$KM_BIN" -v >/dev/null 2>&1 && ! "$KM_BIN" -h >/dev/null 2>&1; then
-    if [ ! -s "$KM_BIN" ]; then
+  if ! "$KM_BIN" --help >/dev/null 2>&1 && ! "$KM_BIN" -h >/dev/null 2>&1 && ! "$KM_BIN" -v >/dev/null 2>&1; then
+    if command -v file >/dev/null 2>&1 && ! file "$KM_BIN" | grep -qi "ELF"; then
       rm -f "$KM_BIN"
-      warn "komari-agent 下载内容为空或损坏"
+      warn "komari-agent 下载文件格式非法，非有效 ELF 架构二进制"
       return 1
     fi
   fi
@@ -450,10 +449,16 @@ download_komari() {
 }
 
 download_turn2socks() {
-  local t2s_arch="amd64"
+  local t2s_arch="amd64" exp_t2s_sha=""
   case "$(uname -m)" in
-    aarch64|arm64) t2s_arch="arm64" ;;
-    *)             t2s_arch="amd64" ;;
+    aarch64|arm64)
+      t2s_arch="arm64"
+      exp_t2s_sha="9ea50c94d2ef65c5aa4d85cd4acf0e1501a358ebab64fb726555421e916394d8"
+      ;;
+    *)
+      t2s_arch="amd64"
+      exp_t2s_sha="1d65aaf21837ebcd8dae9ed08294a4c21547b50a9b4afd63cd1a0329da42847e"
+      ;;
   esac
 
   if [ -x "$TURN2SOCKS_BIN" ]; then
@@ -470,18 +475,27 @@ download_turn2socks() {
     fi
   fi
 
+  warn "安全提示: turn2socks 组件用于 TURN 出口流量转接，即将进行 SHA256 完整性验证并部署"
   log "正在下载 turn2socks 二进制 (${t2s_arch})..."
-  local url="https://github.com/zaofengyue/singbox/releases/latest/download/turn2socks-linux-${t2s_arch}"
-  if download_file "$url" "$TURN2SOCKS_BIN"; then
-    chmod +x "$TURN2SOCKS_BIN"
-    if [ ! -s "$TURN2SOCKS_BIN" ]; then
-      rm -f "$TURN2SOCKS_BIN"
-      warn "turn2socks 文件为空或损坏"
-      return 1
+  local url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
+  local tmp_t2s="/tmp/t2s_dl_$$"
+  if download_file "$url" "$tmp_t2s"; then
+    if [ -n "$exp_t2s_sha" ] && command -v sha256sum >/dev/null 2>&1; then
+      local act_t2s_sha
+      act_t2s_sha="$(sha256sum "$tmp_t2s" 2>/dev/null | awk '{print $1}')"
+      if [ "$act_t2s_sha" != "$exp_t2s_sha" ]; then
+        rm -f "$tmp_t2s"
+        warn "turn2socks SHA256 校验不匹配 (期望: ${exp_t2s_sha:0:16}..., 实际: ${act_t2s_sha:0:16}...)"
+        return 1
+      fi
+      log "turn2socks SHA256 安全校验通过 (${act_t2s_sha:0:16}...)"
     fi
+    mv -f "$tmp_t2s" "$TURN2SOCKS_BIN"
+    chmod +x "$TURN2SOCKS_BIN"
     log "turn2socks 部署就绪"
     return 0
   fi
+  rm -f "$tmp_t2s"
   warn "turn2socks 下载或编译失败"
   return 1
 }
@@ -680,6 +694,19 @@ open_firewall_port() {
       *)    ip6tables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
             ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
     esac
+  fi
+  persist_firewall_rules
+}
+
+persist_firewall_rules() {
+  [ "$(id -u)" = "0" ] || return 0
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  elif command -v iptables-save >/dev/null 2>&1; then
+    if [ -d /etc/iptables ]; then
+      iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+      [ -f /etc/iptables/rules.v6 ] && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    fi
   fi
 }
 
@@ -1264,6 +1291,7 @@ EOF
       press_any_key
       ;;
     3)
+      echo -e "${YELLOW}安全提示: TURN 出口功能需启动 turn2socks 辅助转接进程 (已内置 SHA256 完整性防篡改比对)${RESET}"
       read -p "TURN 服务器地址: " t_host
       t_host="$(printf '%s' "$t_host" | tr -d '[:space:]')"
       if [ -z "$t_host" ] || [[ "$t_host" =~ [\"\\\'\<\>\;\&] ]]; then
@@ -1336,6 +1364,11 @@ EOF
 generate_config() {
   load_env
   local uuid reality_port xhttp_port reality_domain reality_priv reality_pub ss_port ss_pass s5_port s5_user s5_pass trojan_port
+  local pub_ip s5_ip_field=""
+  pub_ip="$(get_public_ip)"
+  if [ -n "$pub_ip" ] && [ "$pub_ip" != "127.0.0.1" ] && [ "$pub_ip" != "::1" ]; then
+    s5_ip_field=', "ip": "'"$pub_ip"'"'
+  fi
   uuid="$(get_uuid)"
   reality_port="$(get_val REALITY_PORT)"
   xhttp_port="$(get_val XHTTP_PORT)"
@@ -1532,8 +1565,7 @@ EOF
       "settings": {
         "auth": "password",
         "accounts": [{ "user": "'"$s5_user"'", "pass": "'"$s5_pass"'" }],
-        "udp": true,
-        "ip": "'"$pub_ip"'"
+        "udp": true'"$s5_ip_field"'
       },
       "sniffing": {
         "enabled": true,
