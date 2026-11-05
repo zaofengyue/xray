@@ -1593,13 +1593,8 @@ EOF
     log "WARP 凭据生成成功！(分配内部 IPv4: 172.16.0.2, IPv6: ${v6:-无})"
   fi
 
-  echo -e "${GRAY}------------------------------------------------------------${RESET}"
-  echo -e "请选择出口分流模式:"
-  echo -e "${WHITE}1. 智能分流 (推荐: 仅 Netflix, ChatGPT, Gemini, Disney 走 WARP 解锁，其余直连)${RESET}"
-  echo -e "${WHITE}2. 全局代理 (所有出站流量统一走 WARP 伪装落地 IP)${RESET}"
-  read -p "请选择 [默认 1]: " r_mode_opt
-  local r_mode="split"
-  [ "${r_mode_opt:-1}" = "2" ] && r_mode="global"
+  local r_mode
+  r_mode="$(prompt_route_mode)"
 
   cat > "$OUTBOUND_FILE" << EOF
 TYPE=warp
@@ -3303,6 +3298,11 @@ show_sub() {
 # ── 20. 参数与协议精细化管理菜单 (menu_config) ────────────────────────────────
 menu_config() {
   local config_modified=0
+  local env_bak=""
+  if [ -f "$ENV_FILE" ]; then
+    env_bak="$(mktemp "${ENV_FILE}.bak.XXXXXX" 2>/dev/null || echo "${ENV_FILE}.bak")"
+    cp -f "$ENV_FILE" "$env_bak" 2>/dev/null || true
+  fi
   while true; do
     clear
     local cur_u cur_rp cur_xp cur_rd cur_sp cur_s5 cur_tp cur_argo cur_pref cur_km cur_srv
@@ -3364,7 +3364,8 @@ menu_config() {
           fi
           [ -z "$new_u" ] && [ -r /proc/sys/kernel/random/uuid ] && new_u="$(cat /proc/sys/kernel/random/uuid | tr -d '[:space:]')"
           [ -z "$new_u" ] && command -v uuidgen >/dev/null 2>&1 && new_u="$(uuidgen | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-        elif ! is_valid_uuid "$new_u"; then
+        fi
+        if ! is_valid_uuid "$new_u"; then
           warn "UUID 格式不合法"
           press_any_key
           continue
@@ -3395,7 +3396,10 @@ menu_config() {
             new_rd="$in_rd"
           fi
         fi
-        if [ "$new_rp" != "$cur_rp" ] || [ "$new_xp" != "$cur_xp" ] || [ "$new_rd" != "$cur_rd" ]; then
+        local chk_rp="$cur_rp" chk_xp="$cur_xp"
+        [ "$chk_rp" = "未启用" ] && chk_rp=""
+        [ "$chk_xp" = "未启用" ] && chk_xp=""
+        if [ "$new_rp" != "$chk_rp" ] || [ "$new_xp" != "$chk_xp" ] || [ "$new_rd" != "$cur_rd" ]; then
           set_val REALITY_PORT "$new_rp"
           set_val XHTTP_PORT "$new_xp"
           set_val REALITY_DOMAIN "${new_rd:-www.iij.ad.jp}"
@@ -3419,7 +3423,8 @@ menu_config() {
             new_pass="$(get_ss2022_key "$in_pass")"
           fi
         fi
-        if [ "$new_sp" != "$cur_sp" ] || [ -n "$new_pass" ]; then
+        local chk_sp="$cur_sp"; [ "$chk_sp" = "未启用" ] && chk_sp=""
+        if [ "$new_sp" != "$chk_sp" ] || [ -n "$new_pass" ]; then
           [ -n "$cur_sp" ] && [ "$cur_sp" != "未启用" ] && [ "$cur_sp" != "$new_sp" ] && close_firewall_port "$cur_sp" both
           set_val SS_PORT "$new_sp"
           [ -n "$new_pass" ] && set_val SS_PASS "$new_pass"
@@ -3441,10 +3446,11 @@ menu_config() {
           read -s -p "SOCKS5 密码 [当前已配置，回车保持]: " in_s5_p
           echo ""
           in_s5_p="$(printf '%s' "$in_s5_p" | tr -d '[:space:]"' | tr -d "'")"
-          [ -n "$in_s5_u" ] && new_s5_u="$in_s5_u"
+          [ -n "$in_s5_u" ] && [ "$in_s5_u" != "$cur_s5_u" ] && new_s5_u="$in_s5_u"
           [ -n "$in_s5_p" ] && new_s5_p="$in_s5_p"
         fi
-        if [ "$new_s5" != "$cur_s5" ] || [ -n "$new_s5_u" ] || [ -n "$new_s5_p" ]; then
+        local chk_s5="$cur_s5"; [ "$chk_s5" = "未启用" ] && chk_s5=""
+        if [ "$new_s5" != "$chk_s5" ] || [ -n "$new_s5_u" ] || [ -n "$new_s5_p" ]; then
           [ -n "$cur_s5" ] && [ "$cur_s5" != "未启用" ] && [ "$cur_s5" != "$new_s5" ] && close_firewall_port "$cur_s5" both
           set_val S5_PORT "$new_s5"
           [ -n "$new_s5_u" ] && set_val S5_USER "$new_s5_u"
@@ -3466,7 +3472,8 @@ menu_config() {
             new_tr_p="$(printf '%s' "$in_tr_p" | tr -d '[:space:]@#/?&:"' | tr -d "'")"
           fi
         fi
-        if [ "$new_tp" != "$cur_tp" ] || [ -n "$new_tr_p" ]; then
+        local chk_tp="$cur_tp"; [ "$chk_tp" = "未启用" ] && chk_tp=""
+        if [ "$new_tp" != "$chk_tp" ] || [ -n "$new_tr_p" ]; then
           [ -n "$cur_tp" ] && [ "$cur_tp" != "未启用" ] && [ "$cur_tp" != "$new_tp" ] && close_firewall_port "$cur_tp" tcp
           set_val TROJAN_PORT "$new_tp"
           [ -n "$new_tr_p" ] && set_val TROJAN_PASS "$new_tr_p"
@@ -3536,6 +3543,14 @@ menu_config() {
       7)
         read -p "CDN 优选地址 [当前 ${cur_pref}]: " in_pref
         in_pref="$(printf '%s' "$in_pref" | tr -d '[:space:]')"
+        if [ "$in_pref" = "0" ]; then
+          in_pref="www.visa.com.tw"
+        fi
+        if [[ "$in_pref" =~ [\"\\\'\<\>\;\&] ]]; then
+          warn "地址格式非法"
+          press_any_key
+          continue
+        fi
         if [ -n "$in_pref" ] && [ "$in_pref" != "$cur_pref" ]; then
           set_val CF_PREFER_HOST "$in_pref"
           config_modified=1
@@ -3544,9 +3559,15 @@ menu_config() {
         fi
         ;;
       8)
-        read -p "Komari 域名 [当前 ${cur_km}]: " in_kd
+        read -p "Komari 域名 [当前 ${cur_km}，填 0 关闭]: " in_kd
         in_kd="$(printf '%s' "$in_kd" | tr -d '[:space:]')"
-        if [ -n "$in_kd" ]; then
+        if [ "$in_kd" = "0" ]; then
+          set_val KOMARI_DOMAIN ""
+          set_val KOMARI_TOKEN ""
+          config_modified=1
+          log "Komari 探针已关闭"
+          sleep 0.5
+        elif [ -n "$in_kd" ]; then
           read -s -p "Komari Token: " in_kt
           echo ""
           in_kt="$(printf '%s' "$in_kt" | tr -d '[:space:]')"
@@ -3555,16 +3576,10 @@ menu_config() {
           config_modified=1
           log "Komari 探针已更新"
           sleep 0.5
-        elif [ "$in_kd" = "0" ]; then
-          set_val KOMARI_DOMAIN ""
-          set_val KOMARI_TOKEN ""
-          config_modified=1
-          log "Komari 探针已关闭"
-          sleep 0.5
         fi
         ;;
       9)
-        read -p "连接地址 [当前 ${cur_srv}]: " in_dom
+        read -p "连接地址 [当前 ${cur_srv}，填 0 恢复自动探测]: " in_dom
         in_dom="$(printf '%s' "$in_dom" | tr -d '[:space:]')"
         if [ "$in_dom" = "0" ]; then
           set_val SERVER_DOMAIN ""
@@ -3588,15 +3603,20 @@ menu_config() {
           read -p "配置已修改，是否保存并重启服务生效？[Y/n]: " save_c
           case "$save_c" in
             n|N)
+              [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -f "$env_bak" "$ENV_FILE" 2>/dev/null || true
               load_env
+              rm -f "$env_bak" 2>/dev/null || true
               log "已放弃未保存修改，直接返回"
               sleep 0.5
               ;;
             *)
+              rm -f "$env_bak" 2>/dev/null || true
               log "配置已变更，正在重启服务生效..."
               do_restart
               ;;
           esac
+        else
+          rm -f "$env_bak" 2>/dev/null || true
         fi
         return
         ;;
