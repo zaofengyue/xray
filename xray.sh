@@ -29,8 +29,8 @@ fi
 set -u
 umask 077
 
-# 当脚本通过 curl | bash 等管道执行时，重定向 stdin 至终端以保障交互正常
-if [ ! -t 0 ] && [ -r /dev/tty ]; then
+# 当脚本通过 curl | bash 等管道执行时，若有可用终端则重定向 stdin 以保障交互正常
+if [ ! -t 0 ] && { : </dev/tty; } 2>/dev/null; then
   exec </dev/tty
 fi
 
@@ -73,12 +73,14 @@ SUB_FILE="$APP_DIR/sub.txt"
 SUB_RAW_FILE="$APP_DIR/sub_raw.txt"
 CLASH_META_FILE="$APP_DIR/clash_meta.yaml"
 XRAY_CLIENT_FILE="$APP_DIR/xray_client.json"
+TG_S5_FILE="$APP_DIR/tg_socks.txt"
 
 LOG_FILE="$APP_DIR/run.log"
 CF_LOG="$APP_DIR/cf.log"
 KM_LOG="$APP_DIR/komari.log"
 TURN2SOCKS_LOG="$APP_DIR/turn2socks.log"
 PID_FILE="$APP_DIR/xray.pid"
+RUN_PID="$APP_DIR/run.pid"
 CF_PID="$APP_DIR/cf.pid"
 KM_PID="$APP_DIR/km.pid"
 TURN2SOCKS_PID="$APP_DIR/turn2socks.pid"
@@ -126,6 +128,10 @@ set_val() {
   printf '%s="%s"\n' "$key" "$val" >> "$tmp_f"
   mv -f "$tmp_f" "$ENV_FILE"
   chmod 600 "$ENV_FILE" 2>/dev/null || true
+}
+
+escape_json() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
 load_env() {
@@ -352,6 +358,23 @@ download_xray() {
   fi
   tmpzip="/tmp/xray_dl_$$.zip"
   download_file "$url" "$tmpzip" || { warn "下载 Xray 失败: $url"; return 1; }
+
+  # 校验 SHA256 安全哈希
+  if command -v sha256sum >/dev/null 2>&1; then
+    local dgst_url="${url}.dgst"
+    local exp_sha
+    exp_sha="$(curl -fsSL --retry 2 --connect-timeout 5 -m 15 "$dgst_url" 2>/dev/null | awk -F'= ' '/SHA2-256/{print $2}' | tr -d '[:space:]')"
+    if [ -n "$exp_sha" ]; then
+      local act_sha
+      act_sha="$(sha256sum "$tmpzip" | awk '{print $1}')"
+      if [ "$act_sha" != "$exp_sha" ]; then
+        warn "Xray 压缩包 SHA256 校验失败 (预期: $exp_sha, 实际: $act_sha)"
+        rm -rf "$tmpzip"
+        return 1
+      fi
+      log "Xray 核心 SHA256 校验通过 (${act_sha:0:16}...)"
+    fi
+  fi
   local extract_tmp="/tmp/xray_ext_$$"
   mkdir -p "$extract_tmp"
   extract_zip "$tmpzip" "$extract_tmp"
@@ -514,22 +537,26 @@ port_ok() {
   return 0
 }
 
-get_free_port() {
-  local default_port="${1:-10086}"
-  if port_ok "$default_port"; then
-    echo "$default_port"
-    return
-  fi
+get_random_high_port() {
   local _tries=0 _rand
-  while [ $_tries -lt 30 ]; do
-    _rand=$(( (RANDOM % 28000) + 12000 ))
+  while [ $_tries -lt 60 ]; do
+    _rand=$(( (RANDOM % 45000) + 10001 ))
     if port_ok "$_rand"; then
       echo "$_rand"
       return
     fi
     _tries=$((_tries + 1))
   done
-  echo "$default_port"
+  echo "$(( (RANDOM % 20000) + 20000 ))"
+}
+
+get_free_port() {
+  local p="${1:-}"
+  if [ -n "$p" ] && port_ok "$p"; then
+    echo "$p"
+    return
+  fi
+  get_random_high_port
 }
 
 wait_port() {
@@ -710,13 +737,31 @@ get_ss2022_key() {
       key="$(openssl rand -base64 16 2>/dev/null)"
     fi
     if [ -z "$key" ] && [ -r /dev/urandom ]; then
-      key="$(head -c 16 /dev/urandom | base64 2>/dev/null)"
+      key="$(head -c 16 /dev/urandom | base64 2>/dev/null | tr -d '\r\n')"
     fi
-    if [ -z "$key" ] && [ -r /dev/urandom ]; then
-      key="$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n' | head -c 22)=="
+    if [ -z "$key" ] && command -v python3 >/dev/null 2>&1; then
+      key="$(python3 -c 'import secrets, base64; print(base64.b64encode(secrets.token_bytes(16)).decode())' 2>/dev/null)"
+    fi
+    if [ -z "$key" ] && command -v python >/dev/null 2>&1; then
+      key="$(python -c 'import os, base64; print(base64.b64encode(os.urandom(16)).decode())' 2>/dev/null)"
     fi
   fi
   printf '%s' "$key" | tr -d '\r\n'
+}
+
+get_socks5_creds() {
+  local u p
+  u="$(get_val S5_USER)"
+  p="$(get_val S5_PASS)"
+  if [ -z "$u" ]; then
+    u="user$(od -An -tx1 -N3 /dev/urandom 2>/dev/null | tr -d ' \n' || echo $RANDOM)"
+    set_val S5_USER "$u"
+  fi
+  if [ -z "$p" ]; then
+    p="pass$(od -An -tx1 -N6 /dev/urandom 2>/dev/null | tr -d ' \n' || echo $RANDOM$RANDOM)"
+    set_val S5_PASS "$p"
+  fi
+  echo "$u $p"
 }
 
 ensure_self_signed_cert() {
@@ -741,7 +786,7 @@ ensure_acme() {
   mkdir -p "$STATE_DIR"
   local tmp_acme="$STATE_DIR/acme-dl-$$"
   rm -rf "$tmp_acme" && mkdir -p "$tmp_acme"
-  if ! download_file "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh" "$tmp_acme/acme.sh"; then
+  if ! download_file "https://raw.githubusercontent.com/acmesh-official/acme.sh/3.1.0/acme.sh" "$tmp_acme/acme.sh"; then
     warn "下载 acme.sh 失败，请检查网络"
     rm -rf "$tmp_acme"
     return 1
@@ -916,9 +961,15 @@ setup_warp_outbound() {
       priv_key="$(echo "$kp" | grep -Ei "(Private key|PrivateKey):" | head -1 | awk '{print $NF}')"
       pub_key="$(echo "$kp" | grep -Ei "(Password \(PublicKey\)|Public key|PublicKey):" | head -1 | awk '{print $NF}')"
     fi
-    # 填充与 Base64 格式规范化
-    [ -n "$priv_key" ] && [ ${#priv_key} -eq 43 ] && priv_key="${priv_key}="
-    [ -n "$pub_key" ] && [ ${#pub_key} -eq 43 ] && pub_key="${pub_key}="
+    # URL-safe Base64 转为标准 Base64 (tr '_-' '/+') 并规范补齐等号填充
+    if [ -n "$priv_key" ]; then
+      priv_key="$(printf '%s' "$priv_key" | tr '_-' '/+')"
+      while [ $(( ${#priv_key} % 4 )) -ne 0 ]; do priv_key="${priv_key}="; done
+    fi
+    if [ -n "$pub_key" ]; then
+      pub_key="$(printf '%s' "$pub_key" | tr '_-' '/+')"
+      while [ $(( ${#pub_key} % 4 )) -ne 0 ]; do pub_key="${pub_key}="; done
+    fi
 
     if [ -z "$priv_key" ] || [ -z "$pub_key" ]; then
       read -p "自动生成失败，请手动输入 WireGuard PrivateKey: " priv_key
@@ -1136,10 +1187,7 @@ generate_config() {
   ss_pass="$(get_ss2022_key "$(get_val SS_PASS)")"
 
   s5_port="$(get_val S5_PORT)"
-  s5_user="$(get_val S5_USER)"
-  [ -z "$s5_user" ] && s5_user="${uuid:0:8}"
-  s5_pass="$(get_val S5_PASS)"
-  [ -z "$s5_pass" ] && s5_pass="${uuid:24}"
+  read -r s5_user s5_pass <<< "$(get_socks5_creds)"
 
   trojan_port="$(get_val TROJAN_PORT)"
 
@@ -1414,13 +1462,18 @@ EOF
     p_u="$(grep '^USER=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
     p_pass="$(grep '^PASS=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
     local u_block=""
-    [ -n "$p_u" ] && u_block='"users": [{ "user": "'"$p_u"'", "pass": "'"$p_pass"'" }]'
+    if [ -n "$p_u" ]; then
+      local esc_u esc_pass
+      esc_u="$(escape_json "$p_u")"
+      esc_pass="$(escape_json "$p_pass")"
+      u_block=', "users": [{ "user": "'"$esc_u"'", "pass": "'"$esc_pass"'" }]'
+    fi
 
     local proxy_block='    {
       "tag": "proxy-out",
       "protocol": "'"$out_type"'",
       "settings": {
-        "servers": [{ "address": "'"$p_h"'", "port": '"$p_p"', '"$u_block"' }]
+        "servers": [{ "address": "'"$p_h"'", "port": '"$p_p"''"$u_block"' }]
       }
     }'
     if [ "$out_route_mode" = "global" ]; then
@@ -1700,21 +1753,13 @@ generate_sub() {
   # 5. 直连 Socks5
   local s5_port s5_user s5_pass
   s5_port="$(get_val S5_PORT)"
-  s5_user="$(get_val S5_USER)"
-  s5_pass="$(get_val S5_PASS)"
-  if [ -z "$s5_user" ]; then
-    s5_user="user$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM)"
-    set_val S5_USER "$s5_user"
-  fi
-  if [ -z "$s5_pass" ]; then
-    s5_pass="pass$(head -c 6 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM)"
-    set_val S5_PASS "$s5_pass"
-  fi
+  read -r s5_user s5_pass <<< "$(get_socks5_creds)"
   if [ -n "$s5_port" ] && [ -n "$pub_ip" ]; then
     local s_host="${node_host#[}"
     s_host="${s_host%]}"
     links+=("socks5://${s5_user}:${s5_pass}@${node_host}:${s5_port}#${name}")
-    links+=("tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}")
+    echo "tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}" > "$TG_S5_FILE"
+    chmod 600 "$TG_S5_FILE" 2>/dev/null || true
     local c_n
     c_n="$(next_clash_name)"
     clash_names+=("\"${c_n}\"")
@@ -1787,10 +1832,11 @@ rules:
 EOF
   chmod 600 "$CLASH_META_FILE" 2>/dev/null || true
 
-  # 写入 Xray 客户端专用配置 JSON
-  local r_target_host="${node_host#[}"
-  r_target_host="${r_target_host%]}"
-  cat > "$XRAY_CLIENT_FILE" << EOF
+  # 写入 Xray 客户端专用配置 JSON (仅当 Reality 启用时)
+  if [ -n "$reality_port" ] && [ -n "$reality_pub" ]; then
+    local r_target_host="${node_host#[}"
+    r_target_host="${r_target_host%]}"
+    cat > "$XRAY_CLIENT_FILE" << EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
@@ -1804,7 +1850,7 @@ EOF
       "settings": {
         "vnext": [{
           "address": "${r_target_host}",
-          "port": ${reality_port:-443},
+          "port": ${reality_port},
           "users": [{ "id": "${uuid}", "flow": "xtls-rprx-vision", "encryption": "none" }]
         }]
       },
@@ -1815,7 +1861,7 @@ EOF
           "show": false,
           "fingerprint": "chrome",
           "serverName": "${reality_domain:-www.iij.ad.jp}",
-          "publicKey": "${reality_pub:-}",
+          "publicKey": "${reality_pub}",
           "shortId": ""
         }
       }
@@ -1824,11 +1870,15 @@ EOF
   ]
 }
 EOF
-  chmod 600 "$XRAY_CLIENT_FILE" 2>/dev/null || true
+    chmod 600 "$XRAY_CLIENT_FILE" 2>/dev/null || true
+  else
+    rm -f "$XRAY_CLIENT_FILE" 2>/dev/null || true
+  fi
 }
 
 # ── 14. 服务守护、运行与进程调度 ───────────────────────────────────────────────
 do_run() {
+  echo $$ > "$RUN_PID"
   load_env
   ensure_basic_deps
   ensure_binaries
@@ -1946,6 +1996,7 @@ stop_pid_file() {
 }
 
 do_stop() {
+  stop_pid_file "$RUN_PID"
   stop_pid_file "$PID_FILE"
   stop_pid_file "$CF_PID"
   stop_pid_file "$KM_PID"
@@ -1953,6 +2004,8 @@ do_stop() {
   pkill -f "$BIN_DIR/xray" 2>/dev/null || true
   pkill -f "$BIN_DIR/cloudflared" 2>/dev/null || true
   pkill -f "$BIN_DIR/komari-agent" 2>/dev/null || true
+  pkill -f "$APP_DIR/xray.sh run" 2>/dev/null || true
+  rm -f "$RUN_PID" "$PID_FILE" "$CF_PID" "$KM_PID" 2>/dev/null || true
   log "Xray 及相关组件已全部安全停止"
 }
 
@@ -2039,9 +2092,9 @@ exec /bin/bash \"\$TARGET\" ${subcmd} \"\$@\""
 
     for dest_dir in /usr/local/bin /usr/bin; do
       if [ -d "$dest_dir" ] && [ -w "$dest_dir" ]; then
-        # 若已有系统自带独立 xray 二进制，不覆盖 /usr/bin/xray
-        if [ "$dest_dir" = "/usr/bin" ] && [ "$bin_name" = "xray" ]; then
-          if [ -f "$dest_dir/$bin_name" ] && ! grep -q "APP_DIR" "$dest_dir/$bin_name" 2>/dev/null; then
+        # 若系统已有独立官方 xray 二进制（无论在 /usr/local/bin 还是 /usr/bin），绝不覆盖
+        if [ "$bin_name" = "xray" ]; then
+          if [ -f "$dest_dir/$bin_name" ] && ! grep -q "APP_DIR=" "$dest_dir/$bin_name" 2>/dev/null; then
             continue
           fi
         fi
@@ -2160,21 +2213,20 @@ do_install() {
   in_name="$(get_node_name_prefix)"
 
   if [ "$inst_mode" = "1" ]; then
-    log "正在自动生成优选参数与探测空闲端口..."
+    log "正在自动生成优选参数与探测闲置高位端口 (10000+)..."
     rm -f "$USED_PORTS_FILE"
-    in_reality_port="$(get_free_port 443)"
-    in_xhttp_port="$(get_free_port 8443)"
-    in_ss_port="$(get_free_port 8388)"
-    in_s5_port="$(get_free_port 1080)"
-    in_trojan_port="$(get_free_port 2087)"
+    in_reality_port="$(get_random_high_port)"
+    in_xhttp_port="$(get_random_high_port)"
+    in_ss_port="$(get_random_high_port)"
+    in_s5_port="$(get_random_high_port)"
+    in_trojan_port="$(get_random_high_port)"
     in_disable_argo="false"
     in_argo_domain=""
     in_argo_auth=""
     in_reality_domain="www.iij.ad.jp"
     in_pref_host="www.visa.com.tw"
     in_ss_pass="$(get_ss2022_key "")"
-    in_s5_user="user$(head -c 3 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM)"
-    in_s5_pass="$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM$RANDOM)"
+    read -r in_s5_user in_s5_pass <<< "$(get_socks5_creds)"
   else
     echo ""
     echo -e "${YELLOW}--- 基础参数设置 ---${RESET}"
@@ -2200,14 +2252,14 @@ do_install() {
     esac
 
     echo ""
-    echo -e "${YELLOW}--- 直连协议端口分配 ---${RESET}"
+    echo -e "${YELLOW}--- 直连协议端口分配 (默认自动探测 10000+ 闲置高位端口) ---${RESET}"
     rm -f "$USED_PORTS_FILE"
     local rec_r rec_xh rec_ss rec_s5 rec_tr
-    rec_r="$(get_free_port 443)"
-    rec_xh="$(get_free_port 8443)"
-    rec_ss="$(get_free_port 8388)"
-    rec_s5="$(get_free_port 1080)"
-    rec_tr="$(get_free_port 2087)"
+    rec_r="$(get_random_high_port)"
+    rec_xh="$(get_random_high_port)"
+    rec_ss="$(get_random_high_port)"
+    rec_s5="$(get_random_high_port)"
+    rec_tr="$(get_random_high_port)"
 
     read -p "Reality TCP 端口 [默认 ${rec_r}，填 0 关闭]: " in_reality_port
     in_reality_port="${in_reality_port:-$rec_r}"
@@ -2233,8 +2285,7 @@ do_install() {
     read -p "SOCKS5 端口 [默认 ${rec_s5}，填 0 关闭]: " in_s5_port
     in_s5_port="${in_s5_port:-$rec_s5}"
     [ "$in_s5_port" = "0" ] && in_s5_port=""
-    in_s5_user="user$(head -c 3 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM)"
-    in_s5_pass="$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM$RANDOM)"
+    read -r in_s5_user in_s5_pass <<< "$(get_socks5_creds)"
     if [ -n "$in_s5_port" ]; then
       read -p "SOCKS5 用户名 [默认 ${in_s5_user}]: " custom_s5_u
       in_s5_user="${custom_s5_u:-$in_s5_user}"
@@ -2394,6 +2445,10 @@ show_sub() {
         clear
         echo -e "${GREEN}=== 明文节点链接 (直接导入客户端) ===${RESET}\n"
         [ -f "$SUB_RAW_FILE" ] && cat "$SUB_RAW_FILE"
+        if [ -f "$TG_S5_FILE" ]; then
+          echo -e "\n${CYAN}=== Telegram 专属一键代理链接 ===${RESET}"
+          cat "$TG_S5_FILE"
+        fi
         press_any_key
         ;;
       2)
@@ -2412,7 +2467,11 @@ show_sub() {
       4)
         clear
         echo -e "${GREEN}=== Xray 客户端 JSON 配置 ===${RESET}\n"
-        [ -f "$XRAY_CLIENT_FILE" ] && cat "$XRAY_CLIENT_FILE"
+        if [ -f "$XRAY_CLIENT_FILE" ]; then
+          cat "$XRAY_CLIENT_FILE"
+        else
+          warn "未启用 Reality 直连协议，暂无对应客户端 JSON 配置文件"
+        fi
         press_any_key
         ;;
       5)
@@ -2420,12 +2479,15 @@ show_sub() {
         {
           echo "==================== Xray 节点订阅明细 ===================="
           [ -f "$SUB_RAW_FILE" ] && cat "$SUB_RAW_FILE"
+          [ -f "$TG_S5_FILE" ] && { echo -e "\n==================== Telegram 代理链接 ===================="; cat "$TG_S5_FILE"; }
           echo -e "\n==================== Base64 订阅 ===================="
           [ -f "$SUB_FILE" ] && cat "$SUB_FILE"
           echo -e "\n==================== Clash Meta 配置 ===================="
           [ -f "$CLASH_META_FILE" ] && cat "$CLASH_META_FILE"
-          echo -e "\n==================== Xray 客户端 JSON 配置 ===================="
-          [ -f "$XRAY_CLIENT_FILE" ] && cat "$XRAY_CLIENT_FILE"
+          if [ -f "$XRAY_CLIENT_FILE" ]; then
+            echo -e "\n==================== Xray 客户端 JSON 配置 ===================="
+            cat "$XRAY_CLIENT_FILE"
+          fi
         } > "$out_dump"
         chmod 600 "$out_dump" 2>/dev/null || true
         log "已导出完整订阅配置文件至: ${CYAN}${out_dump}${RESET}"
@@ -2566,10 +2628,7 @@ menu_config() {
         set_val S5_PORT "$new_s5"
         if [ -n "$new_s5" ]; then
           local cur_s5_u cur_s5_p
-          cur_s5_u="$(get_val S5_USER "")"
-          cur_s5_p="$(get_val S5_PASS "")"
-          [ -z "$cur_s5_u" ] && cur_s5_u="user$(head -c 3 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM)"
-          [ -z "$cur_s5_p" ] && cur_s5_p="$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $RANDOM$RANDOM)"
+          read -r cur_s5_u cur_s5_p <<< "$(get_socks5_creds)"
           read -p "SOCKS5 用户名 [默认 ${cur_s5_u}]: " new_s5_u
           set_val S5_USER "${new_s5_u:-$cur_s5_u}"
           read -p "SOCKS5 密码 [默认 ${cur_s5_p}]: " new_s5_p
@@ -2763,9 +2822,22 @@ do_uninstall() {
       fi
       rm -f "/etc/systemd/system/${SVC_NAME}.service"
       local shortcuts=("xr" "xray" "xr-sub" "xr-log" "xr-del" "xray-sub" "xray-log" "xray-del")
-      for n in "${shortcuts[@]}"; do
-        rm -f "/usr/local/bin/$n" "/usr/bin/$n" 2>/dev/null || true
+      for d in /usr/local/bin /usr/bin; do
+        for n in "${shortcuts[@]}"; do
+          local target_path="$d/$n"
+          if [ -f "$target_path" ]; then
+            if grep -q "APP_DIR=" "$target_path" 2>/dev/null; then
+              rm -f "$target_path"
+            elif [ "$n" != "xray" ]; then
+              rm -f "$target_path"
+            fi
+          fi
+        done
       done
+      # 清理 acme.sh 与 xray 的残留定时任务
+      if command -v crontab >/dev/null 2>&1; then
+        (crontab -l 2>/dev/null | grep -v 'acme.sh' | grep -v 'xray' | crontab - 2>/dev/null) || true
+      fi
       rm -rf "$APP_DIR"
       log "已彻底清理并完成卸载"
       exit 0
