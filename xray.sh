@@ -257,6 +257,7 @@ ensure_basic_deps() {
   command -v socat >/dev/null 2>&1 || _missing="$_missing socat"
   command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || _missing="$_missing iproute2"
   command -v pgrep >/dev/null 2>&1 || _missing="$_missing procps"
+  command -v sha256sum >/dev/null 2>&1 || _missing="$_missing coreutils"
 
   if [ -n "$_missing" ]; then
     warn "正在自动安装基础运维组件:${_missing}..."
@@ -359,21 +360,30 @@ download_xray() {
   tmpzip="/tmp/xray_dl_$$.zip"
   download_file "$url" "$tmpzip" || { warn "下载 Xray 失败: $url"; return 1; }
 
-  # 校验 SHA256 安全哈希
-  if command -v sha256sum >/dev/null 2>&1; then
-    local dgst_url="${url}.dgst"
-    local exp_sha
-    exp_sha="$(curl -fsSL --retry 2 --connect-timeout 5 -m 15 "$dgst_url" 2>/dev/null | awk -F'= ' '/SHA2-256/{print $2}' | tr -d '[:space:]')"
-    if [ -n "$exp_sha" ]; then
-      local act_sha
-      act_sha="$(sha256sum "$tmpzip" | awk '{print $1}')"
-      if [ "$act_sha" != "$exp_sha" ]; then
-        warn "Xray 压缩包 SHA256 校验失败 (预期: $exp_sha, 实际: $act_sha)"
-        rm -rf "$tmpzip"
-        return 1
-      fi
-      log "Xray 核心 SHA256 校验通过 (${act_sha:0:16}...)"
+  # 严格校验 SHA256 安全哈希，防范中间人攻击
+  local dgst_url="${url}.dgst"
+  local exp_sha=""
+  exp_sha="$(curl -fsSL --retry 3 --connect-timeout 8 -m 20 "$dgst_url" 2>/dev/null | awk -F'= ' '/SHA2-256/{print $2}' | tr -d '[:space:]')"
+  if [ -n "$exp_sha" ] && command -v sha256sum >/dev/null 2>&1; then
+    local act_sha
+    act_sha="$(sha256sum "$tmpzip" 2>/dev/null | awk '{print $1}')"
+    if [ "$act_sha" != "$exp_sha" ]; then
+      warn "Xray 压缩包 SHA256 校验失败！(预期: $exp_sha, 实际: $act_sha)"
+      rm -rf "$tmpzip"
+      return 1
     fi
+    log "Xray 核心 SHA256 安全校验通过 (${act_sha:0:16}...)"
+  else
+    warn "未能获取 Xray 官方发布哈希或缺少 sha256sum 工具 (${dgst_url})"
+    read -p "是否在无安全哈希校验下强行继续？[y/N]: " bypass_chk
+    case "$bypass_chk" in
+      y|Y) warn "已确认跳过 SHA256 完整性校验" ;;
+      *)
+        rm -rf "$tmpzip"
+        warn "已终止未验证的二进制安装流程"
+        return 1
+        ;;
+    esac
   fi
   local extract_tmp="/tmp/xray_ext_$$"
   mkdir -p "$extract_tmp"
@@ -526,11 +536,30 @@ is_valid_port_or_empty() {
   [ "$p" -ge 1 ] && [ "$p" -le 65535 ]
 }
 
+prompt_port() {
+  local prompt_text="$1" default_val="$2"
+  local res
+  while true; do
+    read -p "$prompt_text" res
+    res="${res:-$default_val}"
+    [ "$res" = "0" ] || [ "$res" = "未启用" ] && { echo ""; return 0; }
+    if is_valid_port_or_empty "$res"; then
+      echo "$res"
+      return 0
+    fi
+    warn "端口格式错误，必须为 1-65535 的数字 (填 0 关闭)"
+  done
+}
+
 port_ok() {
   local p="$1"
   [ -z "$p" ] && return 1
   case "$p" in ''|*[!0-9]*) return 1 ;; esac
   [ "$p" -lt 1 ] || [ "$p" -gt 65535 ] && return 1
+  # 内部保留端口（Argo 分流 8001、内部入站 10000-10003、本地客户端代理 10808-10809）严禁占用
+  case "$p" in
+    8001|10000|10001|10002|10003|10808|10809) return 1 ;;
+  esac
   [ -f "$USED_PORTS_FILE" ] && grep -qx "$p" "$USED_PORTS_FILE" 2>/dev/null && return 1
   port_in_use_os "$p" && return 1
   echo "$p" >> "$USED_PORTS_FILE"
@@ -540,14 +569,22 @@ port_ok() {
 get_random_high_port() {
   local _tries=0 _rand
   while [ $_tries -lt 60 ]; do
-    _rand=$(( (RANDOM % 45000) + 10001 ))
+    _rand=$(( (RANDOM % 48000) + 12000 ))
     if port_ok "$_rand"; then
       echo "$_rand"
-      return
+      return 0
     fi
     _tries=$((_tries + 1))
   done
-  echo "$(( (RANDOM % 20000) + 20000 ))"
+  # 极端情况兜底：顺序扫描 12000-65000，确保必须通过 port_ok 校验
+  local p
+  for ((p=12000; p<=65000; p++)); do
+    if port_ok "$p"; then
+      echo "$p"
+      return 0
+    fi
+  done
+  echo "23456"
 }
 
 get_free_port() {
@@ -557,6 +594,23 @@ get_free_port() {
     return
   fi
   get_random_high_port
+}
+
+open_firewall_ports() {
+  local p_list=("$@")
+  [ "$(id -u)" = "0" ] || return 0
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
+    log "检测到 UFW 防火墙处于激活状态，正在自动放行服务端口..."
+    for p in "${p_list[@]}"; do
+      [ -n "$p" ] && [ "$p" != "0" ] && ufw allow "$p"/tcp >/dev/null 2>&1 && ufw allow "$p"/udp >/dev/null 2>&1 || true
+    done
+  elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+    log "检测到 firewalld 防火墙处于激活状态，正在自动放行服务端口..."
+    for p in "${p_list[@]}"; do
+      [ -n "$p" ] && [ "$p" != "0" ] && firewall-cmd --add-port="$p"/tcp --permanent >/dev/null 2>&1 && firewall-cmd --add-port="$p"/udp --permanent >/dev/null 2>&1 || true
+    done
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
 }
 
 wait_port() {
@@ -1090,15 +1144,25 @@ menu_outbound() {
       local proto="socks"
       [ "$o_opt" = "2" ] && proto="http"
       read -p "代理服务器 IP/域名: " p_host
-      read -p "代理端口: " p_port
+      p_host="$(printf '%s' "$p_host" | tr -d '[:space:]')"
+      if [ -z "$p_host" ] || [[ "$p_host" =~ [\"\\\'\<\>\;\&] ]]; then
+        warn "代理服务器地址格式非法，请勿包含引号或特殊符号"
+        press_any_key
+        return
+      fi
+      p_port="$(prompt_port "代理端口: " "")"
+      if [ -z "$p_port" ]; then
+        warn "代理端口不能为空"
+        press_any_key
+        return
+      fi
       read -p "用户名 (留空无认证): " p_user
       local p_pass=""
       [ -n "$p_user" ] && read -p "密码: " p_pass
-      if [ -n "$p_host" ] && [ -n "$p_port" ]; then
-        local r_m
-        r_m="$(prompt_route_mode)"
-        stop_turn2socks 2>/dev/null || true
-        cat > "$OUTBOUND_FILE" << EOF
+      local r_m
+      r_m="$(prompt_route_mode)"
+      stop_turn2socks 2>/dev/null || true
+      cat > "$OUTBOUND_FILE" << EOF
 TYPE=${proto}
 HOST=${p_host}
 PORT=${p_port}
@@ -1106,16 +1170,25 @@ USER=${p_user}
 PASS=${p_pass}
 ROUTE_MODE=${r_m}
 EOF
-        chmod 600 "$OUTBOUND_FILE"
-        log "${proto^^} 出口配置已保存，正在重启服务生效..."
-        do_restart
-        press_any_key
-      fi
+      chmod 600 "$OUTBOUND_FILE"
+      log "${proto^^} 出口配置已保存，正在重启服务生效..."
+      do_restart
+      press_any_key
       ;;
     3)
       read -p "TURN 服务器地址: " t_host
-      read -p "TURN 服务器端口 [默认 3478]: " t_port
-      t_port="${t_port:-3478}"
+      t_host="$(printf '%s' "$t_host" | tr -d '[:space:]')"
+      if [ -z "$t_host" ] || [[ "$t_host" =~ [\"\\\'\<\>\;\&] ]]; then
+        warn "TURN 服务器地址格式非法，请勿包含引号或特殊符号"
+        press_any_key
+        return
+      fi
+      t_port="$(prompt_port "TURN 服务器端口 [默认 3478]: " "3478")"
+      if [ -z "$t_port" ]; then
+        warn "TURN 端口不能为空"
+        press_any_key
+        return
+      fi
       read -p "用户名 (留空无认证): " t_user
       local t_pass=""
       [ -n "$t_user" ] && read -p "密码: " t_pass
@@ -1469,11 +1542,13 @@ EOF
       u_block=', "users": [{ "user": "'"$esc_u"'", "pass": "'"$esc_pass"'" }]'
     fi
 
+    local esc_h
+    esc_h="$(escape_json "$p_h")"
     local proxy_block='    {
       "tag": "proxy-out",
       "protocol": "'"$out_type"'",
       "settings": {
-        "servers": [{ "address": "'"$p_h"'", "port": '"$p_p"''"$u_block"' }]
+        "servers": [{ "address": "'"$esc_h"'", "port": '"$p_p"''"$u_block"' }]
       }
     }'
     if [ "$out_route_mode" = "global" ]; then
@@ -2261,30 +2336,21 @@ do_install() {
     rec_s5="$(get_random_high_port)"
     rec_tr="$(get_random_high_port)"
 
-    read -p "Reality TCP 端口 [默认 ${rec_r}，填 0 关闭]: " in_reality_port
-    in_reality_port="${in_reality_port:-$rec_r}"
-    [ "$in_reality_port" = "0" ] && in_reality_port=""
-
-    read -p "Reality xhttp 端口 [默认 ${rec_xh}，填 0 关闭]: " in_xhttp_port
-    in_xhttp_port="${in_xhttp_port:-$rec_xh}"
-    [ "$in_xhttp_port" = "0" ] && in_xhttp_port=""
+    in_reality_port="$(prompt_port "Reality TCP 端口 [默认推荐高位 ${rec_r}，填 0 关闭]: " "$rec_r")"
+    in_xhttp_port="$(prompt_port "Reality xhttp 端口 [默认推荐高位 ${rec_xh}，填 0 关闭]: " "$rec_xh")"
 
     if [ -n "$in_reality_port" ] || [ -n "$in_xhttp_port" ]; then
       read -p "Reality 伪装域名 [默认 www.iij.ad.jp]: " in_reality_domain
       in_reality_domain="${in_reality_domain:-www.iij.ad.jp}"
     fi
 
-    read -p "Shadowsocks 2022 端口 [默认 ${rec_ss}，填 0 关闭]: " in_ss_port
-    in_ss_port="${in_ss_port:-$rec_ss}"
-    [ "$in_ss_port" = "0" ] && in_ss_port=""
+    in_ss_port="$(prompt_port "Shadowsocks 2022 端口 [默认推荐高位 ${rec_ss}，填 0 关闭]: " "$rec_ss")"
     if [ -n "$in_ss_port" ]; then
       read -p "SS 密码 [留空随机生成]: " in_ss_pass
       in_ss_pass="$(get_ss2022_key "$in_ss_pass")"
     fi
 
-    read -p "SOCKS5 端口 [默认 ${rec_s5}，填 0 关闭]: " in_s5_port
-    in_s5_port="${in_s5_port:-$rec_s5}"
-    [ "$in_s5_port" = "0" ] && in_s5_port=""
+    in_s5_port="$(prompt_port "SOCKS5 端口 [默认推荐高位 ${rec_s5}，填 0 关闭]: " "$rec_s5")"
     read -r in_s5_user in_s5_pass <<< "$(get_socks5_creds)"
     if [ -n "$in_s5_port" ]; then
       read -p "SOCKS5 用户名 [默认 ${in_s5_user}]: " custom_s5_u
@@ -2293,9 +2359,7 @@ do_install() {
       in_s5_pass="${custom_s5_p:-$in_s5_pass}"
     fi
 
-    read -p "Trojan-TCP 端口 [默认 ${rec_tr}，填 0 关闭]: " in_trojan_port
-    in_trojan_port="${in_trojan_port:-$rec_tr}"
-    [ "$in_trojan_port" = "0" ] && in_trojan_port=""
+    in_trojan_port="$(prompt_port "Trojan-TCP 端口 [默认推荐高位 ${rec_tr}，填 0 关闭]: " "$rec_tr")"
   fi
 
   # 保存配置
@@ -2315,6 +2379,8 @@ do_install() {
   set_val S5_USER "${in_s5_user:-}"
   set_val S5_PASS "${in_s5_pass:-}"
   set_val TROJAN_PORT "${in_trojan_port:-}"
+
+  open_firewall_ports "$in_reality_port" "$in_xhttp_port" "$in_ss_port" "$in_s5_port" "$in_trojan_port"
 
   log "正在准备组件与二进制核心..."
   ensure_binaries
@@ -2437,6 +2503,7 @@ show_sub() {
     echo -e "${WHITE} 3. 查看 Clash Meta 规则配置${RESET}"
     echo -e "${WHITE} 4. 查看 Xray 客户端 JSON 配置${RESET}"
     echo -e "${WHITE} 5. 导出配置至本地文本文件${RESET}"
+    echo -e "${YELLOW} 提示: 若连接超时，请务必在云服务器控制台安全组放行上述端口 (TCP/UDP)${RESET}"
     echo -e "${WHITE} 0. 返回面板${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
     read -p "请输入选项 [0-5]: " s_opt
@@ -2593,6 +2660,7 @@ menu_config() {
           set_val REALITY_DOMAIN "${new_rd:-www.iij.ad.jp}"
           rm -f "$REALITY_KEY_FILE"
         fi
+        open_firewall_ports "$new_rp" "$new_xp"
         config_modified=1
         log "Reality 配置已更新"
         sleep 1
@@ -2611,6 +2679,7 @@ menu_config() {
           read -p "Shadowsocks 密码 [留空随机生成]: " new_pass
           new_pass="$(get_ss2022_key "$new_pass")"
           set_val SS_PASS "$new_pass"
+          open_firewall_ports "$new_sp"
         fi
         config_modified=1
         log "Shadowsocks 配置已更新"
@@ -2633,6 +2702,7 @@ menu_config() {
           set_val S5_USER "${new_s5_u:-$cur_s5_u}"
           read -p "SOCKS5 密码 [默认 ${cur_s5_p}]: " new_s5_p
           set_val S5_PASS "${new_s5_p:-$cur_s5_p}"
+          open_firewall_ports "$new_s5"
         fi
         config_modified=1
         log "SOCKS5 配置已更新"
@@ -2648,6 +2718,7 @@ menu_config() {
           continue
         fi
         set_val TROJAN_PORT "$new_tp"
+        [ -n "$new_tp" ] && open_firewall_ports "$new_tp"
         config_modified=1
         log "Trojan 配置已更新"
         sleep 1
@@ -2834,9 +2905,9 @@ do_uninstall() {
           fi
         done
       done
-      # 清理 acme.sh 与 xray 的残留定时任务
-      if command -v crontab >/dev/null 2>&1; then
-        (crontab -l 2>/dev/null | grep -v 'acme.sh' | grep -v 'xray' | crontab - 2>/dev/null) || true
+      # 仅精准清理本安装目录下的 acme.sh 证书续签与 xray 守护任务，绝不影响系统其他任务
+      if [ -n "$ACME_HOME" ] && [ -n "$APP_DIR" ] && command -v crontab >/dev/null 2>&1; then
+        (crontab -l 2>/dev/null | grep -vF "$ACME_HOME" | grep -vF "$APP_DIR" | crontab - 2>/dev/null) || true
       fi
       rm -rf "$APP_DIR"
       log "已彻底清理并完成卸载"
@@ -2853,7 +2924,14 @@ setup_shortcuts
 
 case "${1:-}" in
   run)     do_run ;;
-  stop)    do_stop ;;
+  stop)
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
+      systemctl stop "$SVC_NAME"
+      log "Xray 系统服务已通过 systemctl 停止"
+    else
+      do_stop
+    fi
+    ;;
   restart) do_restart ;;
   sub)     show_sub ;;
   log)     do_log ;;
