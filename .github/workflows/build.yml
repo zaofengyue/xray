@@ -58,6 +58,8 @@ jobs:
       - name: Build turn2socks binaries
         run: |
           cd turn2socks
+          go vet ./...
+          go test -count=1 ./...
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o ../turn2socks-linux-amd64 .
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o ../turn2socks-linux-arm64 .
           cd ..

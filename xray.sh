@@ -93,6 +93,7 @@ CF_BIN="$BIN_DIR/cloudflared"
 KM_BIN="$BIN_DIR/komari-agent"
 TURN2SOCKS_BIN="$BIN_DIR/turn2socks"
 ACME_HOME="$STATE_DIR/acme"
+FW_RECORD="$STATE_DIR/.fw_rules"
 DEFAULT_XRAY_VER="v26.10.31"
 
 mkdir -p "$APP_DIR" "$STATE_DIR" "$BIN_DIR" "$DOMAIN_CERT_DIR" 2>/dev/null || true
@@ -539,16 +540,30 @@ download_komari() {
   return 0
 }
 
+# 目录是否可信：属主为 root/当前用户，且 group/other 均不可写
+is_trusted_dir() {
+  local d="$1" mode owner
+  [ -d "$d" ] || return 1
+  mode="$(stat -c '%a' "$d" 2>/dev/null)" || return 1
+  owner="$(stat -c '%u' "$d" 2>/dev/null)" || return 1
+  [ "$owner" = "0" ] || [ "$owner" = "$(id -u)" ] || return 1
+  [ $(( 8#$mode & 8#022 )) -eq 0 ]
+}
+
 download_turn2socks() {
-  local t2s_arch="amd64" exp_t2s_sha=""
+  local t2s_arch="" exp_t2s_sha=""
   case "$(uname -m)" in
+    x86_64|amd64)
+      t2s_arch="amd64"
+      exp_t2s_sha="bd6b9965485cac9598cb8fc1c2ab37fb15b8a3871f032994021a06d90e05ada3"
+      ;;
     aarch64|arm64)
       t2s_arch="arm64"
-      exp_t2s_sha="9ea50c94d2ef65c5aa4d85cd4acf0e1501a358ebab64fb726555421e916394d8"
+      exp_t2s_sha="15f36e40303dce07b704dabf514e514b9d1e8d2269e89dd8ade46a2722bef4a0"
       ;;
     *)
-      t2s_arch="amd64"
-      exp_t2s_sha="1d65aaf21837ebcd8dae9ed08294a4c21547b50a9b4afd63cd1a0329da42847e"
+      warn "turn2socks 仅提供 amd64 / arm64 构建，当前架构 $(uname -m) 不受支持"
+      return 1
       ;;
   esac
 
@@ -556,48 +571,46 @@ download_turn2socks() {
     return 0
   fi
 
-  # 1. 优先检测本地仓库源码及 Go 编译环境
-  local local_src=""
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  for d in "$script_dir/turn2socks" "$APP_DIR/turn2socks"; do
-    if [ -f "$d/main.go" ]; then
-      local_src="$d"
-      break
-    fi
-  done
-
-  # 1.1 若本地有预置的同架构二进制，需经 ELF 完整性与安全哈希核验后复用
-  for b in "$script_dir/turn2socks-linux-${t2s_arch}" "$script_dir/bin/turn2socks" "$script_dir/turn2socks"; do
-    if [ -x "$b" ] && [ ! -d "$b" ] && is_valid_elf "$b"; then
-      if [ -n "$exp_t2s_sha" ] && command -v sha256sum >/dev/null 2>&1; then
-        local b_sha
-        b_sha="$(sha256sum "$b" 2>/dev/null | awk '{print $1}')"
-        if [ "$b_sha" != "$exp_t2s_sha" ]; then
-          continue
+  # 1. 开发者模式 (显式开启 TURN2SOCKS_LOCAL=1 才会使用脚本同目录的预置二进制/源码，且目录必须不可被他人写入)
+  if [ "${TURN2SOCKS_LOCAL:-0}" = "1" ]; then
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    if is_trusted_dir "$script_dir"; then
+      local b b_sha
+      for b in "$script_dir/turn2socks-linux-${t2s_arch}" "$script_dir/bin/turn2socks"; do
+        if [ -f "$b" ] && [ -x "$b" ] && is_valid_elf "$b" && command -v sha256sum >/dev/null 2>&1; then
+          b_sha="$(sha256sum "$b" 2>/dev/null | awk '{print $1}')"
+          if [ "$b_sha" = "$exp_t2s_sha" ]; then
+            cp -f "$b" "$TURN2SOCKS_BIN" && chmod +x "$TURN2SOCKS_BIN"
+            log "turn2socks 组件已就绪 (复用哈希核验通过的本地预置: $b)"
+            return 0
+          fi
         fi
-      fi
-      cp -f "$b" "$TURN2SOCKS_BIN"
-      chmod +x "$TURN2SOCKS_BIN"
-      log "turn2socks 组件已就绪 (复用哈希核验通过的本地预置: $b)"
-      return 0
-    fi
-  done
-
-  # 1.2 若检测到本地源码且具备 go 编译器，直接本地原生编译
-  if [ -n "$local_src" ] && command -v go >/dev/null 2>&1; then
-    log "检测到本地项目仓库源码及 Go 编译环境，正在就地编译 turn2socks..."
-    if (cd "$local_src" && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o "$TURN2SOCKS_BIN" .) >/dev/null 2>&1; then
-      chmod +x "$TURN2SOCKS_BIN"
-      log "turn2socks 本地源码编译成功"
-      return 0
+      done
+      local d
+      for d in "$script_dir/turn2socks" "$APP_DIR/turn2socks"; do
+        if [ -f "$d/main.go" ] && is_trusted_dir "$d" && command -v go >/dev/null 2>&1; then
+          log "开发者模式：正在从本地源码编译 turn2socks ($d)..."
+          if (cd "$d" && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o "$TURN2SOCKS_BIN" .) >/dev/null 2>&1; then
+            chmod +x "$TURN2SOCKS_BIN"
+            log "turn2socks 本地源码编译成功"
+            return 0
+          fi
+        fi
+      done
+    else
+      warn "脚本所在目录权限不安全 (可被其他用户写入)，已忽略本地 turn2socks 预置与源码"
     fi
   fi
 
-  # 2. 无法本地编译时，从本仓库官方 Release 获取配套二进制
-  log "正在部署本仓库官方配套组件 turn2socks..."
-  local primary_url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
-  local fallback_url="https://github.com/zaofengyue/xray/releases/download/latest/turn2socks-linux-${t2s_arch}"
+  # 2. 从官方 Release 下载，并强制 SHA256 校验 (无 sha256sum 时拒绝安装)
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    warn "系统缺少 sha256sum，无法校验 turn2socks 完整性，已终止安装"
+    return 1
+  fi
+  log "正在部署官方配套组件 turn2socks (${t2s_arch})..."
+  local primary_url="https://github.com/zaofengyue/xray/releases/download/latest/turn2socks-linux-${t2s_arch}"
+  local fallback_url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
 
   local work
   work="$(mktemp -d "$APP_DIR/.dl.XXXXXX" 2>/dev/null || echo "$APP_DIR/.dl_$$")"
@@ -605,45 +618,53 @@ download_turn2socks() {
   local tmp_t2s="$work/turn2socks"
   local used_url=""
 
-  if download_file "$primary_url" "$tmp_t2s"; then
+  if download_file "$primary_url" "$tmp_t2s" && [ -s "$tmp_t2s" ]; then
     used_url="$primary_url"
-  elif download_file "$fallback_url" "$tmp_t2s"; then
+  elif download_file "$fallback_url" "$tmp_t2s" && [ -s "$tmp_t2s" ]; then
     used_url="$fallback_url"
   fi
 
-  if [ -n "$used_url" ] && [ -s "$tmp_t2s" ]; then
-    # 优先在线拉取 Release 配套 .sha256 文件进行严格校验；若获取失败则自动降级使用预置哈希保底
-    local sha_url="${used_url}.sha256"
-    local dgst_file="$work/t2s.sha256"
-    if curl -fsSL --max-time 5 "$sha_url" -o "$dgst_file" 2>/dev/null || download_file "$sha_url" "$dgst_file"; then
-      local dyn_sha
-      dyn_sha="$(awk '{print $1}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
-      [ -n "$dyn_sha" ] && exp_t2s_sha="$dyn_sha"
-    fi
-    if command -v sha256sum >/dev/null 2>&1; then
-      local act_t2s_sha
-      act_t2s_sha="$(sha256sum "$tmp_t2s" 2>/dev/null | awk '{print $1}')"
-      if [ -n "$exp_t2s_sha" ] && [ "$act_t2s_sha" != "$exp_t2s_sha" ]; then
-        rm -rf "$work"
-        warn "turn2socks SHA256 校验失败 (安全哈希不匹配)"
-        return 1
-      fi
-      log "turn2socks SHA256 校验通过 (${act_t2s_sha:0:16}...)"
-    fi
-    if ! is_valid_elf "$tmp_t2s"; then
-      rm -rf "$work"
-      warn "turn2socks 二进制格式异常 (非合法 ELF)"
-      return 1
-    fi
-    mv -f "$tmp_t2s" "$TURN2SOCKS_BIN"
-    chmod +x "$TURN2SOCKS_BIN"
+  if [ -z "$used_url" ] || [ ! -s "$tmp_t2s" ]; then
     rm -rf "$work"
-    log "turn2socks 部署就绪"
-    return 0
+    warn "turn2socks 下载失败"
+    return 1
   fi
+
+  # 优先采用同一 Release 中随二进制发布的 .sha256 (新版发布无需同步修改脚本)；必须是 64 位十六进制才接受
+  local sha_file="$work/t2s.sha256" dyn_sha=""
+  if curl -fsSL --max-time 5 "${used_url}.sha256" -o "$sha_file" 2>/dev/null || download_file "${used_url}.sha256" "$sha_file"; then
+    dyn_sha="$(awk 'NR==1{print $1}' "$sha_file" 2>/dev/null | tr 'A-F' 'a-f')"
+    if [[ "$dyn_sha" =~ ^[0-9a-f]{64}$ ]]; then
+      [ "$dyn_sha" != "$exp_t2s_sha" ] && log "Release 发布的哈希与脚本内置值不同，按 Release 发布的哈希校验 (版本可能已更新)"
+      exp_t2s_sha="$dyn_sha"
+    fi
+  fi
+
+  local act_t2s_sha
+  act_t2s_sha="$(sha256sum "$tmp_t2s" 2>/dev/null | awk '{print $1}')"
+  if [ "$act_t2s_sha" != "$exp_t2s_sha" ]; then
+    rm -rf "$work"
+    warn "turn2socks SHA256 校验失败 (期望 ${exp_t2s_sha:0:16}...，实际 ${act_t2s_sha:0:16}...)"
+    return 1
+  fi
+  log "turn2socks SHA256 校验通过 (${act_t2s_sha:0:16}...)"
+
+  if ! is_valid_elf "$tmp_t2s"; then
+    rm -rf "$work"
+    warn "turn2socks 二进制格式异常 (非合法 ELF)"
+    return 1
+  fi
+  chmod +x "$tmp_t2s"
+  if ! "$tmp_t2s" -v >/dev/null 2>&1; then
+    rm -rf "$work"
+    warn "turn2socks 无法在当前系统执行"
+    return 1
+  fi
+  mv -f "$tmp_t2s" "$TURN2SOCKS_BIN"
+  chmod +x "$TURN2SOCKS_BIN"
   rm -rf "$work"
-  warn "turn2socks 下载或编译失败"
-  return 1
+  log "turn2socks 部署就绪"
+  return 0
 }
 
 stop_turn2socks() {
@@ -881,57 +902,66 @@ get_free_port() {
   get_random_high_port
 }
 
+_fw_has() { grep -qxF "$1" "$FW_RECORD" 2>/dev/null; }
+_fw_add() { _fw_has "$1" || echo "$1" >> "$FW_RECORD" 2>/dev/null || true; }
+_fw_del() {
+  [ -f "$FW_RECORD" ] || return 0
+  grep -vxF "$1" "$FW_RECORD" > "$FW_RECORD.tmp" 2>/dev/null || true
+  mv -f "$FW_RECORD.tmp" "$FW_RECORD" 2>/dev/null || true
+}
+_fw_ufw_active() { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; }
+_fw_firewalld_active() { command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; }
+_fw_ufw_has() {
+  ufw status 2>/dev/null | awk -v a="$1/$2" -v b="$1" '($1==a || $1==b) && $2=="ALLOW" {f=1} END{exit !f}'
+}
+
+# 解析 "端口[/协议]" 形式的参数，结果写入 _FW_P / _FW_PROTOS
+_fw_parse() {
+  local entry="$1" proto="${2:-}"
+  _FW_P=""; _FW_PROTOS=""
+  if [[ "$entry" =~ ^([0-9]+)/(tcp|udp|both)$ ]]; then
+    _FW_P="${BASH_REMATCH[1]}"; proto="${BASH_REMATCH[2]}"
+  else
+    _FW_P="$entry"; proto="${proto:-both}"
+  fi
+  case "$proto" in
+    both) _FW_PROTOS="tcp udp" ;;
+    tcp|udp) _FW_PROTOS="$proto" ;;
+    *) _FW_PROTOS="tcp udp" ;;
+  esac
+}
+
+# 仅在规则"原本不存在"时才添加，并记录到 FW_RECORD，卸载/改端口时只回收这些记录
 open_firewall_port() {
   local entry="$1" proto="${2:-}"
   [ -z "$entry" ] && return 0
-  local p
-  if [[ "$entry" =~ ^([0-9]+)/(tcp|udp|both)$ ]]; then
-    p="${BASH_REMATCH[1]}"
-    proto="${BASH_REMATCH[2]}"
-  else
-    p="$entry"
-    proto="${proto:-both}"
-  fi
-  [ "$p" = "0" ] && return 0
+  _fw_parse "$entry" "$proto"
+  local p="$_FW_P" protos="$_FW_PROTOS" pr changed=0 reload=0
+  [ -z "$p" ] || [ "$p" = "0" ] && return 0
   [ "$(id -u)" = "0" ] || return 0
 
-  # 1. UFW 防火墙
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
-    case "$proto" in
-      tcp)  ufw allow "$p"/tcp >/dev/null 2>&1 || true ;;
-      udp)  ufw allow "$p"/udp >/dev/null 2>&1 || true ;;
-      *)    ufw allow "$p"/tcp >/dev/null 2>&1 || true; ufw allow "$p"/udp >/dev/null 2>&1 || true ;;
-    esac
-  fi
-
-  # 2. firewalld 防火墙
-  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-    case "$proto" in
-      tcp)  firewall-cmd --add-port="$p"/tcp --permanent >/dev/null 2>&1 || true ;;
-      udp)  firewall-cmd --add-port="$p"/udp --permanent >/dev/null 2>&1 || true ;;
-      *)    firewall-cmd --add-port="$p"/tcp --permanent >/dev/null 2>&1 || true; firewall-cmd --add-port="$p"/udp --permanent >/dev/null 2>&1 || true ;;
-    esac
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
-
-  # 3. 原生 iptables / ip6tables (适配 Oracle Linux 等自带 strict DROP 拦截规则的云主机镜像)
-  if command -v iptables >/dev/null 2>&1; then
-    case "$proto" in
-      tcp)  iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      udp)  iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      *)    iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
-            iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-    esac
-  fi
-  if command -v ip6tables >/dev/null 2>&1; then
-    case "$proto" in
-      tcp)  ip6tables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      udp)  ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      *)    ip6tables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
-            ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-    esac
-  fi
-  persist_firewall_rules
+  for pr in $protos; do
+    if _fw_ufw_active; then
+      if ! _fw_ufw_has "$p" "$pr"; then
+        ufw allow "$p/$pr" >/dev/null 2>&1 && { _fw_add "ufw:$p/$pr"; changed=1; }
+      fi
+    elif _fw_firewalld_active; then
+      if ! firewall-cmd --permanent --query-port="$p/$pr" >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port="$p/$pr" >/dev/null 2>&1 && { _fw_add "fwd:$p/$pr"; changed=1; reload=1; }
+      fi
+    else
+      # 原生 iptables / ip6tables (适配 Oracle Linux 等自带 strict DROP 拦截规则的云主机镜像)
+      if command -v iptables >/dev/null 2>&1 && ! iptables -C INPUT -p "$pr" --dport "$p" -j ACCEPT 2>/dev/null; then
+        iptables -I INPUT -p "$pr" --dport "$p" -j ACCEPT 2>/dev/null && { _fw_add "ipt4:$p/$pr"; changed=1; }
+      fi
+      if command -v ip6tables >/dev/null 2>&1 && ! ip6tables -C INPUT -p "$pr" --dport "$p" -j ACCEPT 2>/dev/null; then
+        ip6tables -I INPUT -p "$pr" --dport "$p" -j ACCEPT 2>/dev/null && { _fw_add "ipt6:$p/$pr"; changed=1; }
+      fi
+    fi
+  done
+  [ "$reload" = "1" ] && { firewall-cmd --reload >/dev/null 2>&1 || true; }
+  [ "$changed" = "1" ] && persist_firewall_rules
+  return 0
 }
 
 persist_firewall_rules() {
@@ -946,56 +976,49 @@ persist_firewall_rules() {
   fi
 }
 
+_fw_remove_key() {
+  local key="$1" be rest p pr
+  be="${key%%:*}"; rest="${key#*:}"; p="${rest%%/*}"; pr="${rest##*/}"
+  case "$be" in
+    ufw)  command -v ufw >/dev/null 2>&1 && { ufw delete allow "$p/$pr" >/dev/null 2>&1 || true; } ;;
+    fwd)  command -v firewall-cmd >/dev/null 2>&1 && { firewall-cmd --permanent --remove-port="$p/$pr" >/dev/null 2>&1 || true; _FW_RELOAD=1; } ;;
+    ipt4) command -v iptables >/dev/null 2>&1 && { iptables -D INPUT -p "$pr" --dport "$p" -j ACCEPT 2>/dev/null || true; } ;;
+    ipt6) command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p "$pr" --dport "$p" -j ACCEPT 2>/dev/null || true; } ;;
+  esac
+  _fw_del "$key"
+}
+
+# 只回收"由本脚本新增"的规则 (见 FW_RECORD)，不会动用户原本就开放的端口
 close_firewall_port() {
   local entry="$1" proto="${2:-}"
   [ -z "$entry" ] && return 0
-  local p
-  if [[ "$entry" =~ ^([0-9]+)/(tcp|udp|both)$ ]]; then
-    p="${BASH_REMATCH[1]}"
-    proto="${BASH_REMATCH[2]}"
-  else
-    p="$entry"
-    proto="${proto:-both}"
-  fi
-  [ "$p" = "0" ] && return 0
+  _fw_parse "$entry" "$proto"
+  local p="$_FW_P" protos="$_FW_PROTOS" pr be
+  [ -z "$p" ] || [ "$p" = "0" ] && return 0
   [ "$(id -u)" = "0" ] || return 0
+  _FW_RELOAD=0
+  for pr in $protos; do
+    for be in ufw fwd ipt4 ipt6; do
+      _fw_has "$be:$p/$pr" && _fw_remove_key "$be:$p/$pr"
+    done
+  done
+  [ "${_FW_RELOAD:-0}" = "1" ] && { firewall-cmd --reload >/dev/null 2>&1 || true; }
+  persist_firewall_rules
+  return 0
+}
 
-  # 1. UFW 防火墙
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
-    case "$proto" in
-      tcp)  ufw delete allow "$p"/tcp >/dev/null 2>&1 || true ;;
-      udp)  ufw delete allow "$p"/udp >/dev/null 2>&1 || true ;;
-      *)    ufw delete allow "$p"/tcp >/dev/null 2>&1 || true; ufw delete allow "$p"/udp >/dev/null 2>&1 || true ;;
-    esac
-  fi
-
-  # 2. firewalld 防火墙
-  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-    case "$proto" in
-      tcp)  firewall-cmd --remove-port="$p"/tcp --permanent >/dev/null 2>&1 || true ;;
-      udp)  firewall-cmd --remove-port="$p"/udp --permanent >/dev/null 2>&1 || true ;;
-      *)    firewall-cmd --remove-port="$p"/tcp --permanent >/dev/null 2>&1 || true; firewall-cmd --remove-port="$p"/udp --permanent >/dev/null 2>&1 || true ;;
-    esac
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
-
-  # 3. 原生 iptables / ip6tables
-  if command -v iptables >/dev/null 2>&1; then
-    case "$proto" in
-      tcp)  iptables -D INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      udp)  iptables -D INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      *)    iptables -D INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
-            iptables -D INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-    esac
-  fi
-  if command -v ip6tables >/dev/null 2>&1; then
-    case "$proto" in
-      tcp)  ip6tables -D INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      udp)  ip6tables -D INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-      *)    ip6tables -D INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
-            ip6tables -D INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
-    esac
-  fi
+# 卸载时回收所有记录在案的规则 (包含 ACME 申请证书时放行的 80 端口)
+close_recorded_firewall_rules() {
+  [ -f "$FW_RECORD" ] || return 0
+  [ "$(id -u)" = "0" ] || return 0
+  local keys=() k
+  mapfile -t keys < "$FW_RECORD"
+  _FW_RELOAD=0
+  for k in "${keys[@]+"${keys[@]}"}"; do
+    [ -n "$k" ] && _fw_remove_key "$k"
+  done
+  [ "${_FW_RELOAD:-0}" = "1" ] && { firewall-cmd --reload >/dev/null 2>&1 || true; }
+  rm -f "$FW_RECORD" 2>/dev/null || true
   persist_firewall_rules
 }
 
@@ -1419,7 +1442,10 @@ menu_domain_cert() {
         mkdir -p "$DOMAIN_CERT_DIR/$domain"
         "$ACME_HOME/acme.sh" --home "$ACME_HOME" --register-account -m "admin@${domain}" --server letsencrypt >/dev/null 2>&1 || true
         log "正在向 Let's Encrypt 申请证书..."
-        if "$ACME_HOME/acme.sh" --home "$ACME_HOME" --issue -d "$domain" --standalone --httpport 80 --server letsencrypt; then
+        "$ACME_HOME/acme.sh" --home "$ACME_HOME" --issue -d "$domain" --standalone --httpport 80 --server letsencrypt
+        local acme_rc=$?
+        # acme.sh 返回 2 表示证书仍在有效期内、无需重新签发，此时仍应继续安装证书并应用
+        if [ "$acme_rc" = "0" ] || [ "$acme_rc" = "2" ]; then
           "$ACME_HOME/acme.sh" --home "$ACME_HOME" --install-cert -d "$domain" \
             --key-file "$DOMAIN_CERT_DIR/$domain/key.pem" \
             --fullchain-file "$DOMAIN_CERT_DIR/$domain/cert.pem" \
@@ -3771,6 +3797,8 @@ do_uninstall() {
         [ -n "$p_ss" ]    && close_firewall_port "$p_ss" both
         [ -n "$p_s5" ]    && close_firewall_port "$p_s5" both
       fi
+
+      close_recorded_firewall_rules
 
       local shortcuts=("xr" "xray" "xr-sub" "xr-log" "xr-del" "xr-rollback" "xray-sub" "xray-log" "xray-del" "xray-rollback")
       for d in /usr/local/bin /usr/bin; do
