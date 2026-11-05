@@ -611,14 +611,13 @@ download_turn2socks() {
   fi
 
   if [ -n "$used_url" ] && [ -s "$tmp_t2s" ]; then
-    if [ -z "$exp_t2s_sha" ]; then
-      local sha_url="${used_url}.sha256"
-      local dgst_file="$work/t2s.sha256"
-      if curl -fsSL --max-time 5 "$sha_url" -o "$dgst_file" 2>/dev/null || download_file "$sha_url" "$dgst_file"; then
-        local dyn_sha
-        dyn_sha="$(awk '{print $1}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
-        [ -n "$dyn_sha" ] && exp_t2s_sha="$dyn_sha"
-      fi
+    # 优先在线拉取 Release 配套 .sha256 文件进行严格校验；若获取失败则自动降级使用预置哈希保底
+    local sha_url="${used_url}.sha256"
+    local dgst_file="$work/t2s.sha256"
+    if curl -fsSL --max-time 5 "$sha_url" -o "$dgst_file" 2>/dev/null || download_file "$sha_url" "$dgst_file"; then
+      local dyn_sha
+      dyn_sha="$(awk '{print $1}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
+      [ -n "$dyn_sha" ] && exp_t2s_sha="$dyn_sha"
     fi
     if command -v sha256sum >/dev/null 2>&1; then
       local act_t2s_sha
@@ -762,7 +761,7 @@ port_in_use_os() {
 
 is_reserved_port() {
   case "$1" in
-    8001|10000|10001|10002|10003) return 0 ;;
+    8001|10000|10001|10002|10003|10808) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -786,7 +785,7 @@ prompt_port() {
       continue
     fi
     if is_reserved_port "$res"; then
-      warn "端口 $res 为脚本内部保留端口 (8001, 10000-10003)，请换用其他端口"
+      warn "端口 $res 为脚本内部保留端口 (8001, 10000-10003, 10808)，请换用其他端口"
       continue
     fi
     if [ -n "$exclude_ports" ] && [[ " $exclude_ports " =~ " $res " ]]; then
@@ -814,6 +813,27 @@ prompt_remote_port() {
       return 0
     fi
     warn "端口格式错误，必须为 1-65535 的有效端口数字 (填 0 或留空取消)"
+  done
+}
+
+prompt_relay_port() {
+  local prompt_text="$1" default_val="${2:-10808}"
+  local res
+  while true; do
+    read -p "$prompt_text" res
+    res="${res:-$default_val}"
+    if ! is_valid_port_or_empty "$res" || [ -z "$res" ]; then
+      warn "端口格式错误，必须为 1-65535 的有效端口数字"
+      continue
+    fi
+    case "$res" in
+      8001|10000|10001|10002|10003)
+        warn "端口 $res 为内部分流端口 (8001, 10000-10003)，不可用作转接监听"
+        continue
+        ;;
+    esac
+    echo "$res"
+    return 0
   done
 }
 
@@ -1694,7 +1714,7 @@ EOF
         read -s -p "密码: " t_pass
         echo ""
       fi
-      t_lport="$(prompt_port "本地 SOCKS5 转接端口 [默认 10808]: " "10808")"
+      t_lport="$(prompt_relay_port "本地 SOCKS5 转接端口 [默认 10808]: " "10808")"
       if [ -n "$t_host" ]; then
         local r_m
         r_m="$(prompt_route_mode)"
@@ -3653,19 +3673,27 @@ do_menu() {
   done
 }
 
+# 判断某个服务文件是否由本脚本生成：新版带标记行；旧版无标记，则以 ExecStart/command 指向本安装目录为准
+_is_our_unit() {
+  local f="$1"
+  [ -f "$f" ] || return 1
+  grep -q "Generated-by: universal-xray-installer" "$f" 2>/dev/null && return 0
+  grep -qF "${APP_DIR}/xray.sh" "$f" 2>/dev/null
+}
+
 do_uninstall() {
   read -p "确定要彻底卸载 Xray 与全部配置文件和快捷方式吗? [y/N]: " confirm
   case "$confirm" in
     y|Y)
       do_stop
-      if [ -f "/etc/systemd/system/${SVC_NAME}.service" ] && grep -q "Generated-by: universal-xray-installer" "/etc/systemd/system/${SVC_NAME}.service" 2>/dev/null; then
+      if _is_our_unit "/etc/systemd/system/${SVC_NAME}.service"; then
         if command -v systemctl >/dev/null 2>&1; then
           systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
           systemctl daemon-reload >/dev/null 2>&1 || true
         fi
         rm -f "/etc/systemd/system/${SVC_NAME}.service"
       fi
-      if [ -f "/etc/init.d/xray" ] && grep -q "Generated-by: universal-xray-installer" "/etc/init.d/xray" 2>/dev/null; then
+      if _is_our_unit "/etc/init.d/xray"; then
         if command -v rc-update >/dev/null 2>&1; then
           rc-update del xray default >/dev/null 2>&1 || true
         fi
