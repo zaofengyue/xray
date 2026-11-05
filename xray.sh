@@ -475,7 +475,7 @@ download_turn2socks() {
     fi
   fi
 
-  warn "安全提示: turn2socks 组件用于 TURN 出口流量转接，即将进行 SHA256 完整性验证并部署"
+  log "正在部署官方配套组件 turn2socks (已启用 SHA256 完整性校验)..."
   log "正在下载 turn2socks 二进制 (${t2s_arch})..."
   local url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
   local tmp_t2s="/tmp/t2s_dl_$$"
@@ -1291,7 +1291,7 @@ EOF
       press_any_key
       ;;
     3)
-      echo -e "${YELLOW}安全提示: TURN 出口功能需启动 turn2socks 辅助转接进程 (已内置 SHA256 完整性防篡改比对)${RESET}"
+      echo -e "${CYAN}提示: TURN 出口将由配套组件 turn2socks 进行本地转接${RESET}"
       read -p "TURN 服务器地址: " t_host
       t_host="$(printf '%s' "$t_host" | tr -d '[:space:]')"
       if [ -z "$t_host" ] || [[ "$t_host" =~ [\"\\\'\<\>\;\&] ]]; then
