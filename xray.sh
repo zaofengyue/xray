@@ -1749,35 +1749,75 @@ EOF
 }
 
 setup_shortcuts() {
-  if [ "$(id -u)" = "0" ]; then
-    local script_target="$APP_DIR/xray.sh"
-    local _src_is_file=false
-    case "$0" in
-      /dev/*|/proc/*|bash|sh|-*|*bash*|*sh*) _src_is_file=false ;;
-      *) [ -f "$0" ] && [ -s "$0" ] && _src_is_file=true ;;
-    esac
+  [ "$(id -u)" = "0" ] || return 0
+  local script_target="$APP_DIR/xray.sh"
 
-    if $_src_is_file; then
-      [ "$0" != "$script_target" ] && cp -f "$0" "$script_target"
-    else
-      if [ ! -s "$script_target" ] || ! grep -q "do_menu" "$script_target" 2>/dev/null; then
-        log "正在保存管理脚本至本地..."
-        local SCRIPT_RAW="https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh"
-        if ! download_file "$SCRIPT_RAW" "$script_target"; then
-          curl -fsSL "$SCRIPT_RAW" -o "$script_target" 2>/dev/null || wget -qO "$script_target" "$SCRIPT_RAW" 2>/dev/null || true
-        fi
+  # 1. 确保核心脚本文件安全持久化，杜绝拷贝自身或拷贝 bash
+  local _src_is_file=false
+  case "$0" in
+    /dev/*|/proc/*|bash|sh|-*|*bash*|*sh*) _src_is_file=false ;;
+    *) [ -f "$0" ] && [ -s "$0" ] && _src_is_file=true ;;
+  esac
+
+  local real_src real_target
+  real_src="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+  real_target="$(readlink -f "$script_target" 2>/dev/null || echo "$script_target")"
+
+  if $_src_is_file && [ "$real_src" != "$real_target" ] && [ "$real_src" != "/bin/bash" ] && [ "$real_src" != "/usr/bin/bash" ]; then
+    cp -f "$0" "$script_target" 2>/dev/null || true
+  else
+    if [ ! -s "$script_target" ] || ! grep -q "do_menu" "$script_target" 2>/dev/null; then
+      log "正在保存管理脚本至 ${script_target}..."
+      local SCRIPT_RAW="https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh"
+      if ! download_file "$SCRIPT_RAW" "$script_target"; then
+        curl -fsSL "$SCRIPT_RAW" -o "$script_target" 2>/dev/null || wget -qO "$script_target" "$SCRIPT_RAW" 2>/dev/null || true
       fi
     fi
-    chmod +x "$script_target" 2>/dev/null || true
-    ln -sf "$script_target" /usr/local/bin/xr
-    ln -sf "$script_target" /usr/local/bin/xray
-    ln -sf "$script_target" /usr/local/bin/xr-sub
-    ln -sf "$script_target" /usr/local/bin/xr-log
-    ln -sf "$script_target" /usr/local/bin/xr-del
-    ln -sf "$script_target" /usr/local/bin/xray-sub
-    ln -sf "$script_target" /usr/local/bin/xray-log
-    ln -sf "$script_target" /usr/local/bin/xray-del
   fi
+  chmod +x "$script_target" 2>/dev/null || true
+
+  # 2. 创建高可用防自毁自愈 Wrapper 启动器，双向部署至 /usr/local/bin 与 /usr/bin
+  create_shortcut_bin() {
+    local bin_name="$1" subcmd="${2:-}"
+    local wrapper_content
+    wrapper_content="#!/usr/bin/env bash
+APP_DIR=\"${APP_DIR}\"
+TARGET=\"\$APP_DIR/xray.sh\"
+if [ ! -s \"\$TARGET\" ] || ! grep -q \"do_menu\" \"\$TARGET\" 2>/dev/null; then
+  echo \"检测到管理脚本缺失或损坏，正在自动修复同步...\"
+  mkdir -p \"\$APP_DIR\"
+  curl -fsSL \"https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh\" -o \"\$TARGET\" 2>/dev/null || \
+  wget -qO \"\$TARGET\" \"https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh\" 2>/dev/null || true
+  chmod +x \"\$TARGET\" 2>/dev/null || true
+fi
+exec /bin/bash \"\$TARGET\" ${subcmd} \"\$@\""
+
+    for dest_dir in /usr/local/bin /usr/bin; do
+      if [ -d "$dest_dir" ] && [ -w "$dest_dir" ]; then
+        rm -f "$dest_dir/$bin_name" 2>/dev/null || true
+        printf '%s\n' "$wrapper_content" > "$dest_dir/$bin_name"
+        chmod +x "$dest_dir/$bin_name" 2>/dev/null || true
+      fi
+    done
+  }
+
+  create_shortcut_bin "xr" ""
+  create_shortcut_bin "xray" ""
+  create_shortcut_bin "xr-sub" "sub"
+  create_shortcut_bin "xr-log" "log"
+  create_shortcut_bin "xr-del" "del"
+  create_shortcut_bin "xray-sub" "sub"
+  create_shortcut_bin "xray-log" "log"
+  create_shortcut_bin "xray-del" "del"
+
+  # 3. 环境变量 PATH 兜底注入
+  for RC in "$HOME_DIR/.profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.zshrc"; do
+    [ -e "$RC" ] || : > "$RC" 2>/dev/null || true
+    if [ -f "$RC" ] && ! grep -q "/usr/local/bin" "$RC" 2>/dev/null; then
+      printf '\nexport PATH="/usr/local/bin:/usr/bin:$PATH"\n' >> "$RC" 2>/dev/null || true
+    fi
+  done
+  export PATH="/usr/local/bin:/usr/bin:$PATH"
 }
 
 # ── 16. 组件在线无感热升级与脚本自更新 ─────────────────────────────────────────
@@ -2351,7 +2391,7 @@ do_menu() {
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
           do_stop
           systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
-          rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray*
+          rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray* /usr/bin/xr* /usr/bin/xray*
           rm -rf "$APP_DIR" "$BIN_DIR"
           log "已彻底清理卸载"
           exit 0
@@ -2380,7 +2420,7 @@ case "${1:-}" in
   del)
     do_stop
     systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray*
+    rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray* /usr/bin/xr* /usr/bin/xray*
     rm -rf "$APP_DIR" "$BIN_DIR"
     log "已卸载"
     ;;
@@ -2391,7 +2431,7 @@ case "${1:-}" in
       xr-del|xray-del)
         do_stop
         systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray*
+        rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray* /usr/bin/xr* /usr/bin/xray*
         rm -rf "$APP_DIR" "$BIN_DIR"
         log "已卸载"
         ;;
