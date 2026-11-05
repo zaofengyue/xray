@@ -139,17 +139,13 @@ load_env() {
   while IFS='=' read -r k v || [ -n "$k" ]; do
     case "$k" in
       '#'*|'') continue ;;
-      *)
-        case "$k" in
-          PATH|SHELL|USER|HOME|IFS) continue ;;
-        esac
-        if [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-          v="${v#\"}"
-          v="${v%\"}"
-          printf -v "$k" '%s' "$v"
-          export "$k"
-        fi
+      UUID|NAME|PUBLIC_IP|CUSTOM_PUBLIC_IP|IP|PORT|SUB|ARGO_*|CF_*|REALITY_*|XHTTP_*|SS_*|S5_*|TROJAN_*|KOMARI_*|SERVER_DOMAIN|DISABLE_ARGO|USE_GHPROXY)
+        v="${v#\"}"
+        v="${v%\"}"
+        printf -v "$k" '%s' "$v"
+        export "$k"
         ;;
+      *) continue ;;
     esac
   done < "$ENV_FILE"
 }
@@ -403,7 +399,10 @@ download_xray() {
 
   # 严格校验 SHA256 安全哈希，防范中间人攻击 (优先直连 GitHub 获取官方哈希防范第三方镜像篡改)
   local exp_sha=""
-  if curl -fsSL --max-time 5 "${url}.dgst" -o "$dgst_file" 2>/dev/null || download_file "${url}.dgst" "$dgst_file"; then
+  if curl -fsSL --max-time 5 "${url}.dgst" -o "$dgst_file" 2>/dev/null; then
+    exp_sha="$(awk -F'= ' '/SHA2-256/{print $2}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
+  elif download_file "${url}.dgst" "$dgst_file"; then
+    warn "未能直连 GitHub 获取校验哈希，已回退至镜像源下载 .dgst（请注意第三方镜像供应链风险）"
     exp_sha="$(awk -F'= ' '/SHA2-256/{print $2}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
   fi
 
@@ -565,12 +564,19 @@ download_turn2socks() {
     fi
   done
 
-  # 1.1 若本地有预置的同架构二进制，直接拷贝复用
+  # 1.1 若本地有预置的同架构二进制，需经 ELF 完整性与安全哈希核验后复用
   for b in "$script_dir/turn2socks-linux-${t2s_arch}" "$script_dir/bin/turn2socks" "$script_dir/turn2socks"; do
-    if [ -x "$b" ] && [ ! -d "$b" ]; then
+    if [ -x "$b" ] && [ ! -d "$b" ] && is_valid_elf "$b"; then
+      if [ -n "$exp_t2s_sha" ] && command -v sha256sum >/dev/null 2>&1; then
+        local b_sha
+        b_sha="$(sha256sum "$b" 2>/dev/null | awk '{print $1}')"
+        if [ "$b_sha" != "$exp_t2s_sha" ]; then
+          continue
+        fi
+      fi
       cp -f "$b" "$TURN2SOCKS_BIN"
       chmod +x "$TURN2SOCKS_BIN"
-      log "turn2socks 组件已就绪 (复用本地预置: $b)"
+      log "turn2socks 组件已就绪 (复用哈希核验通过的本地预置: $b)"
       return 0
     fi
   done
@@ -603,6 +609,13 @@ download_turn2socks() {
   fi
 
   if [ -n "$used_url" ] && [ -s "$tmp_t2s" ]; then
+    local sha_url="${used_url}.sha256"
+    local dgst_file="$work/t2s.sha256"
+    if curl -fsSL --max-time 5 "$sha_url" -o "$dgst_file" 2>/dev/null || download_file "$sha_url" "$dgst_file"; then
+      local dyn_sha
+      dyn_sha="$(awk '{print $1}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
+      [ -n "$dyn_sha" ] && exp_t2s_sha="$dyn_sha"
+    fi
     if command -v sha256sum >/dev/null 2>&1; then
       local act_t2s_sha
       act_t2s_sha="$(sha256sum "$tmp_t2s" 2>/dev/null | awk '{print $1}')"
@@ -630,12 +643,7 @@ download_turn2socks() {
 }
 
 stop_turn2socks() {
-  if [ -f "$TURN2SOCKS_PID" ]; then
-    local p
-    p="$(cat "$TURN2SOCKS_PID" 2>/dev/null)"
-    [ -n "$p" ] && kill "$p" 2>/dev/null || true
-    rm -f "$TURN2SOCKS_PID" 2>/dev/null || true
-  fi
+  stop_pid_file "$TURN2SOCKS_PID" "$TURN2SOCKS_BIN"
   pkill -f "$BIN_DIR/turn2socks" 2>/dev/null || true
 }
 
@@ -770,11 +778,12 @@ prompt_remote_port() {
   while true; do
     read -p "$prompt_text" res
     res="${res:-$default_val}"
-    if is_valid_port_or_empty "$res" && [ -n "$res" ]; then
+    [ -z "$res" ] || [ "$res" = "0" ] && { echo ""; return 0; }
+    if is_valid_port_or_empty "$res"; then
       echo "$res"
       return 0
     fi
-    warn "端口格式错误，必须为 1-65535 的有效端口数字 (1-65535)"
+    warn "端口格式错误，必须为 1-65535 的有效端口数字 (填 0 或留空取消)"
   done
 }
 
@@ -957,6 +966,7 @@ get_public_ip() {
   local custom_ip
   custom_ip="$(get_val CUSTOM_PUBLIC_IP)"
   [ -z "$custom_ip" ] && custom_ip="$(get_val IP)"
+  [ -z "$custom_ip" ] && custom_ip="$(get_val PUBLIC_IP)"
   if [ -n "$custom_ip" ] && is_valid_ip "$custom_ip"; then
     echo "$custom_ip"
     return
@@ -1630,6 +1640,7 @@ EOF
       ;;
     3)
       echo -e "${CYAN}提示: TURN 出口将由配套组件 turn2socks 进行本地转接${RESET}"
+      stop_turn2socks 2>/dev/null || true
       local t_host t_port t_user t_pass="" t_lport
       read -p "TURN 服务器地址: " t_host
       t_host="$(printf '%s' "$t_host" | tr -d '[:space:]')"
@@ -2271,7 +2282,7 @@ generate_sub() {
   [ -z "$reality_domain" ] && reality_domain="www.iij.ad.jp"
   read -r _ reality_pub <<< "$(get_reality_keys)"
 
-  if [ -n "$reality_port" ] && [ -n "$reality_pub" ] && [ -n "$pub_ip" ]; then
+  if [ -n "$reality_port" ] && [ -n "$reality_pub" ] && [ -n "$node_host" ]; then
     local r_host="${node_host#[}"
     r_host="${r_host%]}"
     local n_r_tcp="${name}-Reality-TCP"
@@ -2296,7 +2307,7 @@ generate_sub() {
   # 3. 直连 VLESS-Reality (xhttp)
   local xhttp_port
   xhttp_port="$(get_val XHTTP_PORT)"
-  if [ -n "$xhttp_port" ] && [ -n "$reality_pub" ] && [ -n "$pub_ip" ]; then
+  if [ -n "$xhttp_port" ] && [ -n "$reality_pub" ] && [ -n "$node_host" ]; then
     local rx_host="${node_host#[}"
     rx_host="${rx_host%]}"
     local n_r_xh="${name}-Reality-xhttp"
@@ -2325,7 +2336,7 @@ generate_sub() {
   local ss_port ss_pass
   ss_port="$(get_val SS_PORT)"
   ss_pass="$(get_ss_pass)"
-  if [ -n "$ss_port" ] && [ -n "$pub_ip" ]; then
+  if [ -n "$ss_port" ] && [ -n "$node_host" ]; then
     local ss_uinfo
     ss_uinfo="$(b64_urlsafe "2022-blake3-aes-128-gcm:${ss_pass}")"
     local n_ss="${name}-SS-2022"
@@ -2346,7 +2357,7 @@ generate_sub() {
   local s5_port s5_user s5_pass
   s5_port="$(get_val S5_PORT)"
   read -r s5_user s5_pass <<< "$(get_socks5_creds)"
-  if [ -n "$s5_port" ] && [ -n "$pub_ip" ]; then
+  if [ -n "$s5_port" ] && [ -n "$node_host" ]; then
     local s_host="${node_host#[}"
     s_host="${s_host%]}"
     local n_s5="${name}-Socks5"
@@ -2366,7 +2377,7 @@ generate_sub() {
   # 6. 直连 Trojan-TCP
   local trojan_port
   trojan_port="$(get_val TROJAN_PORT)"
-  if [ -n "$trojan_port" ] && [ -n "$pub_ip" ]; then
+  if [ -n "$trojan_port" ] && [ -n "$node_host" ]; then
     local tr_sni tr_insec="1" skip_cert="true"
     tr_sni="$(get_val TROJAN_CERT_DOMAIN)"
     [ -z "$tr_sni" ] && tr_sni="$(get_val SERVER_DOMAIN)"
@@ -2559,11 +2570,19 @@ stop_pid_file() {
     p="$(cat "$p_file" 2>/dev/null | tr -d '[:space:]')"
     if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
       if [ -n "$expected_bin" ] && [ -d "/proc/$p" ]; then
-        local exe_target
-        exe_target="$(readlink -f "/proc/$p/exe" 2>/dev/null || true)"
-        if [ -n "$exe_target" ] && [ "$exe_target" != "$expected_bin" ]; then
-          rm -f "$p_file" 2>/dev/null || true
-          return 0
+        if [ "$expected_bin" = "run" ] || [ "$expected_bin" = "xray.sh" ]; then
+          if ! grep -q "xray.sh" "/proc/$p/cmdline" 2>/dev/null; then
+            rm -f "$p_file" 2>/dev/null || true
+            return 0
+          fi
+        else
+          local exe_target
+          exe_target="$(readlink -f "/proc/$p/exe" 2>/dev/null || true)"
+          exe_target="${exe_target% (deleted)}"
+          if [ -n "$exe_target" ] && [ "$exe_target" != "$expected_bin" ]; then
+            rm -f "$p_file" 2>/dev/null || true
+            return 0
+          fi
         fi
       fi
       kill "$p" 2>/dev/null || true
@@ -2657,7 +2676,7 @@ do_stop() {
   if command -v systemctl >/dev/null 2>&1 && systemctl is-active "$SVC_NAME" >/dev/null 2>&1; then
     systemctl stop "$SVC_NAME" 2>/dev/null || true
   fi
-  stop_pid_file "$RUN_PID"
+  stop_pid_file "$RUN_PID" "xray.sh"
   stop_pid_file "$PID_FILE" "$XRAY_BIN"
   stop_pid_file "$CF_PID" "$CF_BIN"
   stop_pid_file "$KM_PID" "$KM_BIN"
@@ -2688,7 +2707,7 @@ setup_systemd() {
     warn "非 root 用户，跳过全局开机自启服务注册"
     return
   fi
-  if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
     cat > "/etc/systemd/system/${SVC_NAME}.service" << EOF
 [Unit]
 Description=Xray Universal Proxy Engine
@@ -2713,15 +2732,30 @@ EOF
     systemctl daemon-reload
     systemctl enable "${SVC_NAME}" >/dev/null 2>&1 || true
     log "Systemd 系统级服务 (${SVC_NAME}.service) 注册完成"
-  else
-    # 针对 Alpine (OpenRC) 或无 systemd 环境，通过 crontab 注册 @reboot 自启守护
-    if command -v crontab >/dev/null 2>&1; then
-      ensure_cron || true
-      if ! crontab -l 2>/dev/null | grep -q "${APP_DIR}/xray.sh run"; then
-        (crontab -l 2>/dev/null; echo "@reboot /bin/bash ${APP_DIR}/xray.sh run >/dev/null 2>&1 &") | crontab - 2>/dev/null || true
-      fi
-      log "检测到无 systemd 环境，已通过 crontab (@reboot) 注册开机自启"
+  elif [ -d /etc/init.d ]; then
+    cat > /etc/init.d/xray << EOF
+#!/sbin/openrc-run
+name="xray"
+description="Xray Universal Proxy Engine"
+command="/bin/bash"
+command_args="${APP_DIR}/xray.sh run"
+command_background="yes"
+pidfile="/run/xray.pid"
+
+depend() {
+  need net
+  after firewall
+}
+EOF
+    chmod +x /etc/init.d/xray 2>/dev/null || true
+    command -v rc-update >/dev/null 2>&1 && rc-update add xray default >/dev/null 2>&1 || true
+    log "已通过 OpenRC (/etc/init.d/xray) 注册开机自启"
+  elif command -v crontab >/dev/null 2>&1; then
+    ensure_cron || true
+    if ! crontab -l 2>/dev/null | grep -q "${APP_DIR}/xray.sh run"; then
+      (crontab -l 2>/dev/null; echo "@reboot /bin/bash ${APP_DIR}/xray.sh run >/dev/null 2>&1 &") | crontab - 2>/dev/null || true
     fi
+    log "检测到无 init 服务环境，已通过 crontab (@reboot) 注册开机自启"
   fi
 }
 
@@ -3584,6 +3618,13 @@ do_uninstall() {
         systemctl daemon-reload >/dev/null 2>&1 || true
       fi
       rm -f "/etc/systemd/system/${SVC_NAME}.service"
+      if command -v rc-update >/dev/null 2>&1; then
+        rc-update del xray default >/dev/null 2>&1 || true
+      fi
+      rm -f "/etc/init.d/xray"
+      if command -v crontab >/dev/null 2>&1; then
+        crontab -l 2>/dev/null | grep -v "${APP_DIR}/xray.sh run" | crontab - 2>/dev/null || true
+      fi
 
       # 清理之前放行的防火墙端口规则
       if [ -f "$ENV_FILE" ]; then
