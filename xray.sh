@@ -362,23 +362,32 @@ download_xray() {
     target_ver="v${target_ver#v}"
     url="https://github.com/XTLS/Xray-core/releases/download/${target_ver}/Xray-linux-${xarch}.zip"
   fi
-  tmpzip="/tmp/xray_dl_$$.zip"
-  download_file "$url" "$tmpzip" || { warn "下载 Xray 失败: $url"; return 1; }
+  # 临时工作目录统一收敛在 700 权限的 $APP_DIR 内，杜绝 /tmp 下的 TOCTOU 竞争与可预测文件风险
+  local work
+  work="$(mktemp -d "$APP_DIR/.dl.XXXXXX" 2>/dev/null || echo "$APP_DIR/.dl_$$")"
+  mkdir -p "$work" && chmod 700 "$work"
+  local tmpzip="$work/xray.zip"
+  local dgst_file="$work/xray.zip.dgst"
+  local extract_tmp="$work/extracted"
+
+  if ! download_file "$url" "$tmpzip"; then
+    rm -rf "$work"
+    warn "下载 Xray 失败: $url"
+    return 1
+  fi
 
   # 严格校验 SHA256 安全哈希，防范中间人攻击 (复用 download_file 确保纯 IPv6/NAT64 兼容)
-  local dgst_file="${tmpzip}.dgst"
   local exp_sha=""
   if download_file "${url}.dgst" "$dgst_file"; then
     exp_sha="$(awk -F'= ' '/SHA2-256/{print $2}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
-    rm -f "$dgst_file"
   fi
 
   if [ -n "$exp_sha" ] && command -v sha256sum >/dev/null 2>&1; then
     local act_sha
     act_sha="$(sha256sum "$tmpzip" 2>/dev/null | awk '{print $1}')"
     if [ "$act_sha" != "$exp_sha" ]; then
+      rm -rf "$work"
       warn "Xray 压缩包 SHA256 校验失败！(预期: $exp_sha, 实际: $act_sha)"
-      rm -rf "$tmpzip"
       return 1
     fi
     log "Xray 核心 SHA256 安全校验通过 (${act_sha:0:16}...)"
@@ -389,24 +398,24 @@ download_xray() {
       case "$bypass_chk" in
         y|Y) warn "已确认跳过 SHA256 完整性校验" ;;
         *)
-          rm -rf "$tmpzip"
+          rm -rf "$work"
           warn "已终止未验证的二进制安装流程"
           return 1
           ;;
       esac
     else
       warn "非交互式环境下无安全哈希可供校验，为保障安全已终止安装"
-      rm -rf "$tmpzip"
+      rm -rf "$work"
       return 1
     fi
   fi
-  local extract_tmp="/tmp/xray_ext_$$"
+
   mkdir -p "$extract_tmp"
   extract_zip "$tmpzip" "$extract_tmp"
   mv -f "$extract_tmp/xray" "$XRAY_BIN"
   [ -f "$extract_tmp/geoip.dat" ] && mv -f "$extract_tmp/geoip.dat" "$BIN_DIR/"
   [ -f "$extract_tmp/geosite.dat" ] && mv -f "$extract_tmp/geosite.dat" "$BIN_DIR/"
-  rm -rf "$tmpzip" "$extract_tmp"
+  rm -rf "$work"
   chmod +x "$XRAY_BIN"
   log "Xray-core 部署就绪: $("$XRAY_BIN" version 2>/dev/null | head -1)"
   return 0
@@ -478,24 +487,45 @@ download_turn2socks() {
   log "正在部署官方配套组件 turn2socks (已启用 SHA256 完整性校验)..."
   log "正在下载 turn2socks 二进制 (${t2s_arch})..."
   local url="https://github.com/zaofengyue/singbox/releases/download/latest/turn2socks-linux-${t2s_arch}"
-  local tmp_t2s="/tmp/t2s_dl_$$"
+
+  local work
+  work="$(mktemp -d "$APP_DIR/.dl.XXXXXX" 2>/dev/null || echo "$APP_DIR/.dl_$$")"
+  mkdir -p "$work" && chmod 700 "$work"
+  local tmp_t2s="$work/turn2socks"
+
   if download_file "$url" "$tmp_t2s"; then
-    if [ -n "$exp_t2s_sha" ] && command -v sha256sum >/dev/null 2>&1; then
+    if command -v sha256sum >/dev/null 2>&1; then
       local act_t2s_sha
       act_t2s_sha="$(sha256sum "$tmp_t2s" 2>/dev/null | awk '{print $1}')"
-      if [ "$act_t2s_sha" != "$exp_t2s_sha" ]; then
-        rm -f "$tmp_t2s"
-        warn "turn2socks SHA256 校验不匹配 (期望: ${exp_t2s_sha:0:16}..., 实际: ${act_t2s_sha:0:16}...)"
-        return 1
+      if [ -n "$exp_t2s_sha" ] && [ "$act_t2s_sha" != "$exp_t2s_sha" ]; then
+        warn "turn2socks 检测到远端版本与内置已知指纹不一致"
+        warn "已知指纹: ${exp_t2s_sha:0:16}..., 实际计算: ${act_t2s_sha:0:16}..."
+        if [ -t 0 ] && { : </dev/tty; } 2>/dev/null; then
+          read -p "是否信任并继续使用此新版本？[y/N]: " t2s_bypass </dev/tty
+          case "$t2s_bypass" in
+            y|Y) warn "已确认使用新版本" ;;
+            *)
+              rm -rf "$work"
+              warn "已终止未验证组件安装"
+              return 1
+              ;;
+          esac
+        else
+          rm -rf "$work"
+          warn "非交互环境下哈希指纹不匹配，为保障安全已终止安装"
+          return 1
+        fi
+      else
+        log "turn2socks SHA256 安全校验通过 (${act_t2s_sha:0:16}...)"
       fi
-      log "turn2socks SHA256 安全校验通过 (${act_t2s_sha:0:16}...)"
     fi
     mv -f "$tmp_t2s" "$TURN2SOCKS_BIN"
     chmod +x "$TURN2SOCKS_BIN"
+    rm -rf "$work"
     log "turn2socks 部署就绪"
     return 0
   fi
-  rm -f "$tmp_t2s"
+  rm -rf "$work"
   warn "turn2socks 下载或编译失败"
   return 1
 }
@@ -2324,23 +2354,27 @@ do_update_script() {
   echo -e "${GREEN}==================== 更新 xray.sh 管理脚本 ====================${RESET}"
   local SCRIPT_RAW="https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh"
   log "正在从 GitHub 检测并下载最新脚本..."
-  local tmp_sh
-  tmp_sh="$(mktemp "/tmp/xray_sh_update.XXXXXX" 2>/dev/null || echo "/tmp/xray_sh_$$.sh")"
+  local work tmp_sh
+  work="$(mktemp -d "$APP_DIR/.dl.XXXXXX" 2>/dev/null || echo "$APP_DIR/.dl_$$")"
+  mkdir -p "$work" && chmod 700 "$work"
+  tmp_sh="$work/xray_update.sh"
+
   if download_file "$SCRIPT_RAW" "$tmp_sh"; then
     if [ -s "$tmp_sh" ] && bash -n "$tmp_sh" >/dev/null 2>&1 && grep -q 'do_menu' "$tmp_sh" 2>/dev/null; then
       cp -f "$APP_DIR/xray.sh" "$APP_DIR/xray.sh.bak" 2>/dev/null || true
       mv -f "$tmp_sh" "$APP_DIR/xray.sh"
       chmod +x "$APP_DIR/xray.sh"
+      rm -rf "$work"
       log "管理脚本更新成功！正在自动重新进入管理面板..."
       sleep 2
       exec bash "$APP_DIR/xray.sh"
     else
       warn "更新包语法校验失败，已取消替换以保护系统完整性"
-      rm -f "$tmp_sh"
+      rm -rf "$work"
     fi
   else
     warn "下载失败，请检查网络连接"
-    rm -f "$tmp_sh"
+    rm -rf "$work"
   fi
   press_any_key
 }
