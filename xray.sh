@@ -89,7 +89,7 @@ export XRAY_LOCATION_ASSET="$BIN_DIR"
 
 # ── 4. 安全配置环境变量工具 ────────────────────────────────────────────────────
 get_val() {
-  local key="$1" def="$2"
+  local key="$1" def="${2:-}"
   if [ ! -f "$ENV_FILE" ]; then
     printf '%s' "$def"
     return 0
@@ -106,7 +106,7 @@ get_val() {
 }
 
 set_val() {
-  local key="$1" val="$2"
+  local key="$1" val="${2:-}"
   mkdir -p "$APP_DIR"
   [ -f "$ENV_FILE" ] || touch "$ENV_FILE"
   if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
@@ -284,7 +284,7 @@ download_file() {
   local success=1
   local mirrors=("$url")
   if [[ "$url" =~ github.com ]]; then
-    mirrors+=("https://ghproxy.net/${url}" "https://mirror.ghproxy.com/${url}" "https://gh-proxy.com/${url}")
+    mirrors+=("https://ghproxy.net/${url}")
   fi
 
   for u in "${mirrors[@]}"; do
@@ -540,7 +540,9 @@ get_public_ip() {
   if [ -z "$ip" ]; then
     ip="$(curl -6 -sL --max-time 2 https://api64.ipify.org 2>/dev/null || curl -sL --max-time 2 https://ipinfo.io/ip 2>/dev/null || true)"
   fi
-  echo "${ip:-127.0.0.1}"
+  ip="${ip:-127.0.0.1}"
+  [ "$ip" != "127.0.0.1" ] && set_val PUBLIC_IP "$ip"
+  echo "$ip"
 }
 
 get_node_name_prefix() {
@@ -616,14 +618,14 @@ get_reality_keys() {
   local priv="" pub=""
   if [ -f "$REALITY_KEY_FILE" ]; then
     priv="$(grep -Ei '^(PrivateKey|Private key):' "$REALITY_KEY_FILE" 2>/dev/null | head -1 | awk '{print $NF}')"
-    pub="$(grep -Ei '^(PublicKey|Public key):' "$REALITY_KEY_FILE" 2>/dev/null | head -1 | awk '{print $NF}')"
+    pub="$(grep -Ei '(Password \(PublicKey\)|PublicKey|Public key):' "$REALITY_KEY_FILE" 2>/dev/null | head -1 | awk '{print $NF}')"
   fi
   if [ -z "$priv" ] || [ -z "$pub" ]; then
     if [ -x "$XRAY_BIN" ]; then
       local kp
       kp="$("$XRAY_BIN" x25519 2>/dev/null)"
       priv="$(echo "$kp" | grep -Ei "(Private key|PrivateKey):" | head -1 | awk '{print $NF}')"
-      pub="$(echo "$kp" | grep -Ei "(Public key|PublicKey):" | head -1 | awk '{print $NF}')"
+      pub="$(echo "$kp" | grep -Ei "(Password \(PublicKey\)|Public key|PublicKey):" | head -1 | awk '{print $NF}')"
       if [ -n "$priv" ] && [ -n "$pub" ]; then
         echo "PrivateKey: $priv" > "$REALITY_KEY_FILE"
         echo "PublicKey: $pub" >> "$REALITY_KEY_FILE"
@@ -632,6 +634,43 @@ get_reality_keys() {
     fi
   fi
   echo "$priv $pub"
+}
+
+get_ss2022_key() {
+  local in_p="${1:-}"
+  local key=""
+  if [ -n "$in_p" ]; then
+    local dec_len
+    dec_len="$(printf '%s' "$in_p" | base64 -d 2>/dev/null | wc -c || echo 0)"
+    if [ "$dec_len" = "16" ]; then
+      key="$in_p"
+    elif command -v openssl >/dev/null 2>&1; then
+      key="$(printf '%s' "$in_p" | openssl dgst -sha256 -binary 2>/dev/null | head -c 16 | base64 2>/dev/null)"
+    fi
+  fi
+  if [ -z "$key" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+      key="$(openssl rand -base64 16 2>/dev/null)"
+    fi
+    [ -z "$key" ] && [ -r /dev/urandom ] && key="$(head -c 16 /dev/urandom | base64 2>/dev/null)"
+    [ -z "$key" ] && key="u8s9DfK1L3p0QmNxZb4vTw=="
+  fi
+  printf '%s' "$key" | tr -d '\r\n'
+}
+
+ensure_self_signed_cert() {
+  local cert_dir="$DOMAIN_CERT_DIR/self_signed"
+  local c_file="$cert_dir/cert.pem"
+  local k_file="$cert_dir/key.pem"
+  if [ ! -f "$c_file" ] || [ ! -f "$k_file" ]; then
+    mkdir -p "$cert_dir"
+    if command -v openssl >/dev/null 2>&1; then
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout "$k_file" -out "$c_file" \
+        -days 3650 -subj "/CN=bing.com/O=Microsoft/C=US" >/dev/null 2>&1 || true
+      chmod 600 "$k_file" 2>/dev/null || true
+    fi
+  fi
 }
 
 # ── 10. ACME.sh 自动化域名证书系统 ─────────────────────────────────────────────
@@ -1013,8 +1052,7 @@ generate_config() {
   read -r reality_priv reality_pub <<< "$(get_reality_keys)"
 
   ss_port="$(get_val SS_PORT)"
-  ss_pass="$(get_val SS_PASS)"
-  [ -z "$ss_pass" ] && ss_pass="$(openssl rand -base64 16 2>/dev/null || echo "XrayPasswd12345678")"
+  ss_pass="$(get_ss2022_key "$(get_val SS_PASS)")"
 
   s5_port="$(get_val S5_PORT)"
   s5_user="$(get_val S5_USER)"
@@ -1167,16 +1205,20 @@ EOF
     }'
   fi
 
-  # 5. 直连 Trojan-TCP (支持 ACME 证书绑定)
+  # 5. 直连 Trojan-TCP (支持 ACME 证书与自签证书)
   if [ -n "$trojan_port" ]; then
-    local trojan_cert_dom cert_snippet
+    local trojan_cert_dom cert_snippet c_file="" k_file=""
     trojan_cert_dom="$(get_val TROJAN_CERT_DOMAIN)"
     [ -z "$trojan_cert_dom" ] && trojan_cert_dom="$(get_val SERVER_DOMAIN)"
     if [ -n "$trojan_cert_dom" ] && [ -f "$DOMAIN_CERT_DIR/$trojan_cert_dom/cert.pem" ]; then
-      cert_snippet='"security": "tls", "tlsSettings": { "certificates": [{ "certificateFile": "'"$DOMAIN_CERT_DIR/$trojan_cert_dom/cert.pem"'", "keyFile": "'"$DOMAIN_CERT_DIR/$trojan_cert_dom/key.pem"'" }] }'
+      c_file="$DOMAIN_CERT_DIR/$trojan_cert_dom/cert.pem"
+      k_file="$DOMAIN_CERT_DIR/$trojan_cert_dom/key.pem"
     else
-      cert_snippet='"security": "none"'
+      ensure_self_signed_cert
+      c_file="$DOMAIN_CERT_DIR/self_signed/cert.pem"
+      k_file="$DOMAIN_CERT_DIR/self_signed/key.pem"
     fi
+    cert_snippet='"security": "tls", "tlsSettings": { "certificates": [{ "certificateFile": "'"$c_file"'", "keyFile": "'"$k_file"'" }] }'
     append_inbound '    {
       "tag": "trojan-direct-in",
       "port": '"$trojan_port"',
@@ -1511,11 +1553,16 @@ generate_sub() {
   local trojan_port
   trojan_port="$(get_val TROJAN_PORT)"
   if [ -n "$trojan_port" ] && [ -n "$pub_ip" ]; then
-    local tr_sni tr_sec="none"
+    local tr_sni tr_insec="1"
     tr_sni="$(get_val TROJAN_CERT_DOMAIN)"
     [ -z "$tr_sni" ] && tr_sni="$(get_val SERVER_DOMAIN)"
-    [ -n "$tr_sni" ] && tr_sec="tls"
-    links+=("trojan://${uuid}@${node_host}:${trojan_port}?security=${tr_sec}&sni=${tr_sni:-bing.com}#${name}")
+    if [ -n "$tr_sni" ] && [ -f "$DOMAIN_CERT_DIR/$tr_sni/cert.pem" ]; then
+      tr_insec="0"
+    else
+      tr_sni="bing.com"
+      tr_insec="1"
+    fi
+    links+=("trojan://${uuid}@${node_host}:${trojan_port}?security=tls&sni=${tr_sni}&allowInsecure=${tr_insec}#${name}")
     local tr_host="${node_host#[}"
     tr_host="${tr_host%]}"
     local c_n
@@ -1527,7 +1574,7 @@ generate_sub() {
     port: ${trojan_port}
     password: ${uuid}
     udp: true
-    sni: ${tr_sni:-bing.com}
+    sni: ${tr_sni}
     skip-cert-verify: true")
   fi
 
@@ -1569,7 +1616,7 @@ do_run() {
   generate_config
 
   log "正在预校验 Xray 配置文件语法..."
-  if ! "$XRAY_BIN" -test -config "$CONFIG_FILE"; then
+  if ! "$XRAY_BIN" run -test -config "$CONFIG_FILE"; then
     die "Xray 配置语法测试失败，请检查配置文件格式"
   fi
   log "Xray 语法校验通过 (Syntax OK)"
@@ -1579,20 +1626,19 @@ do_run() {
     start_turn2socks || true
   fi
 
-  pkill -f "$XRAY_BIN" 2>/dev/null || true
+  pkill -x "xray" 2>/dev/null || pkill -f "$XRAY_BIN" 2>/dev/null || true
   "$XRAY_BIN" run -config "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   log "Xray 核心已启动 (PID: $(cat "$PID_FILE"))"
 
   # 启动 Cloudflared (Argo)
   if [ "$(get_val DISABLE_ARGO)" != "true" ] && [ -x "$CF_BIN" ]; then
-    pkill -f "$CF_BIN" 2>/dev/null || true
+    pkill -x "cloudflared" 2>/dev/null || pkill -f "$CF_BIN" 2>/dev/null || true
     local argo_domain argo_auth argo_proto
     argo_domain="$(get_val ARGO_DOMAIN)"
     argo_auth="$(get_val ARGO_AUTH)"
-    argo_proto="$(get_val ARGO_PROTOCOL)"
-    local cf_args=("tunnel" "--edge-ip-version" "auto" "--no-autoupdate")
-    [ -n "$argo_proto" ] && cf_args+=("--protocol" "$argo_proto")
+    argo_proto="$(get_val ARGO_PROTOCOL "http2")"
+    local cf_args=("tunnel" "--edge-ip-version" "auto" "--no-autoupdate" "--protocol" "$argo_proto")
 
     if [ -n "$argo_domain" ] && [ -n "$argo_auth" ]; then
       cf_args+=("run" "--token" "$argo_auth")
@@ -1613,6 +1659,7 @@ do_run() {
       if [ -n "$new_host" ]; then
         set_val ARGO_DOMAIN "$new_host"
         log "临时域名已成功分配: ${GREEN}https://${new_host}${RESET}"
+        generate_sub
       fi
     fi
   fi
@@ -1622,7 +1669,7 @@ do_run() {
   km_dom="$(get_val KOMARI_DOMAIN)"
   km_tok="$(get_val KOMARI_TOKEN)"
   if [ -n "$km_dom" ] && [ -n "$km_tok" ] && [ -x "$KM_BIN" ]; then
-    pkill -f "$KM_BIN" 2>/dev/null || true
+    pkill -x "komari-agent" 2>/dev/null || pkill -f "$KM_BIN" 2>/dev/null || true
     km_dom="${km_dom#http://}"
     km_dom="${km_dom#https://}"
     "$KM_BIN" -e "$km_dom" -t "$km_tok" > "$KM_LOG" 2>&1 &
@@ -1634,7 +1681,7 @@ do_run() {
 
   # 看门狗进程
   while true; do
-    if ! pgrep -f "$XRAY_BIN" >/dev/null 2>&1; then
+    if ! pgrep -x "xray" >/dev/null 2>&1; then
       warn "检测到 Xray 核心意外退出，正在自动拉起守护..."
       "$XRAY_BIN" run -config "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
       echo $! > "$PID_FILE"
@@ -1654,9 +1701,9 @@ do_stop() {
     kill "$(cat "$PID_FILE")" 2>/dev/null || true
     rm -f "$PID_FILE"
   fi
-  pkill -f "$XRAY_BIN" 2>/dev/null || true
-  pkill -f "$CF_BIN" 2>/dev/null || true
-  pkill -f "$KM_BIN" 2>/dev/null || true
+  pkill -x "xray" 2>/dev/null || pkill -f "$XRAY_BIN" 2>/dev/null || true
+  pkill -x "cloudflared" 2>/dev/null || pkill -f "$CF_BIN" 2>/dev/null || true
+  pkill -x "komari-agent" 2>/dev/null || pkill -f "$KM_BIN" 2>/dev/null || true
   stop_turn2socks 2>/dev/null || true
   log "Xray 及相关组件已全部停止"
 }
@@ -1668,7 +1715,7 @@ do_restart() {
   else
     do_stop
     sleep 1
-    nohup "$0" run >/dev/null 2>&1 &
+    nohup "$APP_DIR/xray.sh" run >/dev/null 2>&1 &
     log "已在后台重启服务"
   fi
 }
@@ -1704,8 +1751,24 @@ EOF
 setup_shortcuts() {
   if [ "$(id -u)" = "0" ]; then
     local script_target="$APP_DIR/xray.sh"
-    [ -f "$script_target" ] || cp -f "$0" "$script_target"
-    chmod +x "$script_target"
+    local _src_is_file=false
+    case "$0" in
+      /dev/*|/proc/*|bash|sh|-*|*bash*|*sh*) _src_is_file=false ;;
+      *) [ -f "$0" ] && [ -s "$0" ] && _src_is_file=true ;;
+    esac
+
+    if $_src_is_file; then
+      [ "$0" != "$script_target" ] && cp -f "$0" "$script_target"
+    else
+      if [ ! -s "$script_target" ] || ! grep -q "do_menu" "$script_target" 2>/dev/null; then
+        log "正在保存管理脚本至本地..."
+        local SCRIPT_RAW="https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh"
+        if ! download_file "$SCRIPT_RAW" "$script_target"; then
+          curl -fsSL "$SCRIPT_RAW" -o "$script_target" 2>/dev/null || wget -qO "$script_target" "$SCRIPT_RAW" 2>/dev/null || true
+        fi
+      fi
+    fi
+    chmod +x "$script_target" 2>/dev/null || true
     ln -sf "$script_target" /usr/local/bin/xr
     ln -sf "$script_target" /usr/local/bin/xray
     ln -sf "$script_target" /usr/local/bin/xr-sub
@@ -1820,7 +1883,7 @@ do_install() {
     in_argo_auth=""
     in_reality_domain="www.iij.ad.jp"
     in_pref_host="www.visa.com.tw"
-    in_ss_pass="$(openssl rand -base64 16 2>/dev/null || echo "WnJ5UGFzc3dvcmQxMjM0")"
+    in_ss_pass="$(get_ss2022_key "")"
   else
     echo ""
     echo -e "${YELLOW}--- 基础参数设置 ---${RESET}"
@@ -1868,7 +1931,7 @@ do_install() {
     [ "$in_ss_port" = "0" ] && in_ss_port=""
     if [ -n "$in_ss_port" ]; then
       read -p "SS 密码 [留空随机生成]: " in_ss_pass
-      [ -z "$in_ss_pass" ] && in_ss_pass="$(openssl rand -base64 16 2>/dev/null || echo "WnJ5UGFzc3dvcmQxMjM0")"
+      in_ss_pass="$(get_ss2022_key "$in_ss_pass")"
     fi
 
     read -p "SOCKS5 端口 [默认 ${rec_s5}，填 0 关闭]: " in_s5_port
@@ -1905,10 +1968,30 @@ do_install() {
     systemctl restart "$SVC_NAME"
   else
     do_stop
-    nohup "$0" run >/dev/null 2>&1 &
+    nohup "$APP_DIR/xray.sh" run >/dev/null 2>&1 &
   fi
 
-  sleep 3
+  if [ "${in_disable_argo:-false}" != "true" ]; then
+    log "正在建立 Cloudflare Argo 隧道并获取临时域名..."
+    local cf_wait=0 cur_argo=""
+    while [ $cf_wait -lt 25 ]; do
+      cur_argo="$(get_val ARGO_DOMAIN)"
+      if [ -n "$cur_argo" ] && [ "$cur_argo" != "your-domain.com" ]; then
+        break
+      fi
+      if [ -f "$CF_LOG" ]; then
+        local found_h
+        found_h="$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | head -1 | sed 's|https://||')"
+        if [ -n "$found_h" ]; then
+          set_val ARGO_DOMAIN "$found_h"
+          break
+        fi
+      fi
+      sleep 1
+      cf_wait=$((cf_wait + 1))
+    done
+  fi
+
   generate_sub
   log "恭喜！Xray Universal Proxy Engine 部署成功！"
   show_sub
@@ -2093,7 +2176,7 @@ menu_config() {
         set_val SS_PORT "$new_sp"
         if [ -n "$new_sp" ]; then
           read -p "Shadowsocks 密码 [留空随机生成]: " new_pass
-          [ -z "$new_pass" ] && new_pass="$(openssl rand -base64 16 2>/dev/null || echo "WnJ5UGFzc3dvcmQxMjM0")"
+          new_pass="$(get_ss2022_key "$new_pass")"
           set_val SS_PASS "$new_pass"
         fi
         config_modified=1
