@@ -89,13 +89,20 @@ export XRAY_LOCATION_ASSET="$BIN_DIR"
 
 # ── 4. 安全配置环境变量工具 ────────────────────────────────────────────────────
 get_val() {
-  local key="$1"
-  [ -f "$ENV_FILE" ] || return 0
+  local key="$1" def="$2"
+  if [ ! -f "$ENV_FILE" ]; then
+    printf '%s' "$def"
+    return 0
+  fi
   local val
   val="$(grep "^${key}=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d'=' -f2-)"
   val="${val#\"}"
   val="${val%\"}"
-  printf '%s' "$val"
+  if [ -n "$val" ]; then
+    printf '%s' "$val"
+  else
+    printf '%s' "$def"
+  fi
 }
 
 set_val() {
@@ -184,12 +191,16 @@ nat64_restore_temp() {
 }
 
 # ── 6. 基础系统依赖检测与安装 ──────────────────────────────────────────────────
+_APT_UPDATED=0
 try_install_pkg() {
   local _pkg="$1"
   [ "$(id -u)" = "0" ] || return 0
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq >/dev/null 2>&1 || true
-    apt-get install -y -qq $_pkg >/dev/null 2>&1 || true
+    if [ "$_APT_UPDATED" = "0" ]; then
+      apt-get update -qq -o Acquire::http::Timeout=5 -o Acquire::https::Timeout=5 >/dev/null 2>&1 || true
+      _APT_UPDATED=1
+    fi
+    apt-get install -y -qq -o Acquire::http::Timeout=5 -o Acquire::https::Timeout=5 $_pkg >/dev/null 2>&1 || true
   elif command -v apk >/dev/null 2>&1; then
     apk add --no-cache $_pkg >/dev/null 2>&1 || true
   elif command -v dnf >/dev/null 2>&1; then
@@ -271,11 +282,24 @@ download_file() {
   local url="$1" dest="$2"
   nat64_enable_temp
   local success=1
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 3 --connect-timeout 10 -m 60 "$url" -o "$dest" && success=0
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q --tries=3 --timeout=15 "$url" -O "$dest" && success=0
+  local mirrors=("$url")
+  if [[ "$url" =~ github.com ]]; then
+    mirrors+=("https://ghproxy.net/${url}" "https://mirror.ghproxy.com/${url}" "https://gh-proxy.com/${url}")
   fi
+
+  for u in "${mirrors[@]}"; do
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fsSL --retry 2 --connect-timeout 5 -m 40 "$u" -o "$dest"; then
+        success=0
+        break
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      if wget -q --tries=2 --timeout=10 "$u" -O "$dest"; then
+        success=0
+        break
+      fi
+    fi
+  done
   nat64_restore_temp
   return $success
 }
@@ -500,20 +524,51 @@ wait_port() {
 get_public_ip() {
   local custom_ip
   custom_ip="$(get_val PUBLIC_IP)"
-  if [ -n "$custom_ip" ]; then
-    echo "$custom_ip"
-    return
-  fi
+  [ -n "$custom_ip" ] && { echo "$custom_ip"; return; }
+
   local ip=""
-  if command -v curl >/dev/null 2>&1; then
-    ip="$(curl -4 -sL --max-time 3 https://api.ipify.org 2>/dev/null || curl -4 -sL --max-time 3 https://ipinfo.io/ip 2>/dev/null || true)"
-    if [ -z "$ip" ]; then
-      ip="$(curl -6 -sL --max-time 3 https://api64.ipify.org 2>/dev/null || true)"
-    fi
-  elif command -v wget >/dev/null 2>&1; then
-    ip="$(wget -qO- --timeout=3 https://api.ipify.org 2>/dev/null || true)"
+  local has_v4=0
+  if command -v ip >/dev/null 2>&1; then
+    ip -4 route show default 2>/dev/null | grep -q default && has_v4=1
+  elif command -v route >/dev/null 2>&1; then
+    route -n 2>/dev/null | grep -q '^0.0.0.0' && has_v4=1
+  fi
+
+  if [ "$has_v4" = "1" ]; then
+    ip="$(curl -4 -sL --max-time 2 https://api.ipify.org 2>/dev/null || curl -4 -sL --max-time 2 https://ipinfo.io/ip 2>/dev/null || true)"
+  fi
+  if [ -z "$ip" ]; then
+    ip="$(curl -6 -sL --max-time 2 https://api64.ipify.org 2>/dev/null || curl -sL --max-time 2 https://ipinfo.io/ip 2>/dev/null || true)"
   fi
   echo "${ip:-127.0.0.1}"
+}
+
+get_node_name_prefix() {
+  local custom_name
+  custom_name="$(get_val NAME)"
+  if [ -n "$custom_name" ] && [ "$custom_name" != "xray" ] && [ "$custom_name" != "xr" ]; then
+    echo "$custom_name"
+    return
+  fi
+
+  local country org name_tag
+  country="$(curl -sL --max-time 2 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]')"
+  org="$(curl -sL --max-time 2 https://ipinfo.io/org 2>/dev/null | sed -e 's/^AS[0-9]* //' -e 's/,\? *Inc\.*//' -e 's/,\? *LLC\.*//' | cut -c1-16 | tr ' ' '_')"
+
+  if [ -z "$country" ] || [ -z "$org" ]; then
+    country="$(curl -sL --max-time 2 https://api.ip.sb/geoip 2>/dev/null | grep -o '"country_code":"[^"]*"' | cut -d'"' -f4)"
+    org="$(curl -sL --max-time 2 https://api.ip.sb/geoip 2>/dev/null | grep -o '"asn_organization":"[^"]*"' | cut -d'"' -f4 | cut -c1-16 | tr ' ' '_')"
+  fi
+
+  if [ -n "$country" ] && [ -n "$org" ]; then
+    name_tag="${country}-${org}"
+  elif [ -n "$country" ]; then
+    name_tag="${country}-xr"
+  else
+    name_tag="xr"
+  fi
+  set_val NAME "$name_tag"
+  echo "$name_tag"
 }
 
 format_addr() {
@@ -557,15 +612,15 @@ get_uuid() {
 get_reality_keys() {
   local priv="" pub=""
   if [ -f "$REALITY_KEY_FILE" ]; then
-    priv="$(grep '^PrivateKey:' "$REALITY_KEY_FILE" 2>/dev/null | head -1 | cut -d' ' -f2-)"
-    pub="$(grep '^PublicKey:' "$REALITY_KEY_FILE" 2>/dev/null | head -1 | cut -d' ' -f2-)"
+    priv="$(grep -Ei '^(PrivateKey|Private key):' "$REALITY_KEY_FILE" 2>/dev/null | head -1 | awk '{print $NF}')"
+    pub="$(grep -Ei '^(PublicKey|Public key):' "$REALITY_KEY_FILE" 2>/dev/null | head -1 | awk '{print $NF}')"
   fi
   if [ -z "$priv" ] || [ -z "$pub" ]; then
     if [ -x "$XRAY_BIN" ]; then
       local kp
       kp="$("$XRAY_BIN" x25519 2>/dev/null)"
-      priv="$(echo "$kp" | grep -i "Private key:" | awk '{print $NF}')"
-      pub="$(echo "$kp" | grep -i "Public key:" | awk '{print $NF}')"
+      priv="$(echo "$kp" | grep -Ei "(Private key|PrivateKey):" | head -1 | awk '{print $NF}')"
+      pub="$(echo "$kp" | grep -Ei "(Public key|PublicKey):" | head -1 | awk '{print $NF}')"
       if [ -n "$priv" ] && [ -n "$pub" ]; then
         echo "PrivateKey: $priv" > "$REALITY_KEY_FILE"
         echo "PublicKey: $pub" >> "$REALITY_KEY_FILE"
@@ -984,6 +1039,41 @@ EOF
   # 1. Argo 穿透入站组
   if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
     append_inbound '    {
+      "tag": "argo-dispatcher-in",
+      "port": 8001,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "'"$uuid"'", "level": 0 }],
+        "decryption": "none",
+        "fallbacks": [
+          {
+            "path": "/vmess-ws",
+            "dest": 10000,
+            "xver": 0
+          },
+          {
+            "path": "/vless-ws",
+            "dest": 10001,
+            "xver": 0
+          },
+          {
+            "path": "/trojan-ws",
+            "dest": 10002,
+            "xver": 0
+          },
+          {
+            "path": "/vless-xhttp",
+            "dest": 10003,
+            "xver": 0
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    }'
+    append_inbound '    {
       "tag": "vmess-ws-in",
       "port": 10000,
       "listen": "127.0.0.1",
@@ -1013,7 +1103,7 @@ EOF
       "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": { "clients": [{ "id": "'"$uuid"'" }], "decryption": "none" },
-      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/vless-xhttp", "mode": "packet-up" } }
+      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/vless-xhttp", "mode": "auto" } }
     }'
   fi
 
@@ -1254,8 +1344,7 @@ generate_sub() {
   argo_domain="$(get_val ARGO_DOMAIN)"
   [ -z "$argo_domain" ] && argo_domain="your-domain.com"
   pub_ip="$(get_public_ip)"
-  name="$(get_val NAME)"
-  [ -z "$name" ] && name="xray"
+  name="$(get_node_name_prefix)"
 
   node_host="$(get_val SERVER_DOMAIN)"
   [ -z "$node_host" ] && node_host="$(format_addr "$pub_ip")"
@@ -1267,7 +1356,7 @@ generate_sub() {
   # 1. Argo 穿透链路
   if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
     # VLESS-xhttp
-    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=packet-up&sni=${argo_domain}#${name}-VLESS-xhttp")
+    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=auto&sni=${argo_domain}#${name}-VLESS-xhttp")
     clash_names+=("\"${name}-VLESS-xhttp\"")
     clash_proxies+=("  - name: \"${name}-VLESS-xhttp\"
     type: vless
@@ -1280,7 +1369,7 @@ generate_sub() {
     servername: ${argo_domain}
     xhttp-opts:
       path: /vless-xhttp
-      mode: packet-up
+      mode: auto
       headers:
         Host: ${argo_domain}")
 
@@ -1364,6 +1453,7 @@ generate_sub() {
     servername: ${reality_domain}
     reality-opts:
       public-key: ${reality_pub}
+      short-id: \"\"
     client-fingerprint: chrome")
   fi
 
@@ -1479,7 +1569,7 @@ do_run() {
       "$CF_BIN" "${cf_args[@]}" > "$CF_LOG" 2>&1 &
       log "Cloudflare 固定隧道已启动 (${argo_domain})"
     else
-      cf_args+=("--url" "http://127.0.0.1:10003")
+      cf_args+=("--url" "http://127.0.0.1:8001")
       "$CF_BIN" "${cf_args[@]}" > "$CF_LOG" 2>&1 &
       log "Cloudflare 临时隧道正在建立连接..."
       # 捕获分配的 trycloudflare 临时域名
@@ -1586,7 +1676,11 @@ setup_shortcuts() {
     local script_target="$APP_DIR/xray.sh"
     [ -f "$script_target" ] || cp -f "$0" "$script_target"
     chmod +x "$script_target"
+    ln -sf "$script_target" /usr/local/bin/xr
     ln -sf "$script_target" /usr/local/bin/xray
+    ln -sf "$script_target" /usr/local/bin/xr-sub
+    ln -sf "$script_target" /usr/local/bin/xr-log
+    ln -sf "$script_target" /usr/local/bin/xr-del
     ln -sf "$script_target" /usr/local/bin/xray-sub
     ln -sf "$script_target" /usr/local/bin/xray-log
     ln -sf "$script_target" /usr/local/bin/xray-del
@@ -1658,27 +1752,31 @@ menu_update() {
 # ── 17. 交互式智能安装向导 (do_install) ─────────────────────────────────────────
 do_install() {
   clear
-  echo -e "${GREEN}================================================================${RESET}"
-  echo -e "${WHITE}          Xray Universal Proxy Engine 全自动智能安装向导          ${RESET}"
-  echo -e "${GREEN}================================================================${RESET}"
+  echo -e "${GREEN}====================================================${RESET}"
+  echo -e "${WHITE}               Xray 智能自动化部署向导               ${RESET}"
+  echo -e "${GREEN}====================================================${RESET}"
   ensure_basic_deps
 
   echo -e "${WHITE}请选择安装模式:${RESET}"
-  echo -e "  ${CYAN}1. 快速一键推荐安装 (自动分配无冲突端口、开启 Reality + Argo)${RESET}"
-  echo -e "  ${CYAN}2. 自定义参数交互安装 (逐项定制协议端口、伪装站点、密码等)${RESET}"
+  echo -e "  ${CYAN}1. 快速推荐安装${RESET}"
+  echo -e "  ${CYAN}2. 自定义参数安装${RESET}"
   echo -e "  ${CYAN}0. 取消安装${RESET}"
+  echo -e "${GREEN}----------------------------------------------------${RESET}"
+  local inst_mode
   read -p "请输入选项 [默认 1]: " inst_mode
   inst_mode="${inst_mode:-1}"
 
-  if [ "$inst_mode" = "0" ]; then
-    return
-  fi
+  case "$inst_mode" in
+    0) return ;;
+    1|2) ;;
+    *) inst_mode=1 ;;
+  esac
 
   local in_uuid in_name in_disable_argo in_argo_domain in_argo_auth in_pref_host
   local in_reality_port in_reality_domain in_ss_port in_ss_pass in_s5_port in_trojan_port
 
   in_uuid="$(get_uuid)"
-  in_name="xray"
+  in_name="$(get_node_name_prefix)"
 
   if [ "$inst_mode" = "1" ]; then
     log "正在自动生成优选参数与探测空闲端口..."
@@ -1696,10 +1794,10 @@ do_install() {
   else
     echo ""
     echo -e "${YELLOW}--- 基础参数设置 ---${RESET}"
-    read -p "用户 UUID [留空自动生成: ${in_uuid}]: " custom_u
-    [ -n "$custom_u" ] && in_uuid="$custom_u"
-    read -p "节点名称前缀 [留空默认 xray]: " custom_n
-    [ -n "$custom_n" ] && in_name="$custom_n"
+    read -p "用户 UUID [默认 ${in_uuid}]: " custom_u
+    in_uuid="${custom_u:-$in_uuid}"
+    read -p "节点名称前缀 [默认 ${in_name}]: " custom_n
+    in_name="${custom_n:-$in_name}"
 
     echo ""
     echo -e "${YELLOW}--- Cloudflare Argo 穿透设置 ---${RESET}"
@@ -1708,7 +1806,7 @@ do_install() {
       n|N) in_disable_argo="true" ;;
       *)
         in_disable_argo="false"
-        read -p "Argo 固定域名 (留空使用自动分配的临时隧道): " in_argo_domain
+        read -p "Argo 固定域名 [留空使用临时隧道]: " in_argo_domain
         if [ -n "$in_argo_domain" ]; then
           read -p "Argo Tunnel Token: " in_argo_auth
         fi
@@ -1718,7 +1816,7 @@ do_install() {
     esac
 
     echo ""
-    echo -e "${YELLOW}--- 直连协议端口分配 (留空则不开启) ---${RESET}"
+    echo -e "${YELLOW}--- 直连协议端口分配 ---${RESET}"
     rm -f "$USED_PORTS_FILE"
     local rec_r rec_ss rec_s5 rec_tr
     rec_r="$(get_free_port 443)"
@@ -1726,20 +1824,30 @@ do_install() {
     rec_s5="$(get_free_port 1080)"
     rec_tr="$(get_free_port 2087)"
 
-    read -p "VLESS-Reality 端口 [推荐 ${rec_r}，留空关闭]: " in_reality_port
+    read -p "VLESS-Reality 端口 [默认 ${rec_r}，填 0 关闭]: " in_reality_port
+    in_reality_port="${in_reality_port:-$rec_r}"
+    [ "$in_reality_port" = "0" ] && in_reality_port=""
+
     if [ -n "$in_reality_port" ]; then
-      read -p "Reality 伪装域名 [推荐 www.iij.ad.jp]: " in_reality_domain
+      read -p "Reality 伪装域名 [默认 www.iij.ad.jp]: " in_reality_domain
       in_reality_domain="${in_reality_domain:-www.iij.ad.jp}"
     fi
 
-    read -p "Shadowsocks 2022 端口 [推荐 ${rec_ss}，留空关闭]: " in_ss_port
+    read -p "Shadowsocks 2022 端口 [默认 ${rec_ss}，填 0 关闭]: " in_ss_port
+    in_ss_port="${in_ss_port:-$rec_ss}"
+    [ "$in_ss_port" = "0" ] && in_ss_port=""
     if [ -n "$in_ss_port" ]; then
-      read -p "SS 密码 (留空随机生成): " in_ss_pass
+      read -p "SS 密码 [留空随机生成]: " in_ss_pass
       [ -z "$in_ss_pass" ] && in_ss_pass="$(openssl rand -base64 16 2>/dev/null || echo "WnJ5UGFzc3dvcmQxMjM0")"
     fi
 
-    read -p "SOCKS5 端口 [推荐 ${rec_s5}，留空关闭]: " in_s5_port
-    read -p "Trojan-TCP 端口 [推荐 ${rec_tr}，留空关闭]: " in_trojan_port
+    read -p "SOCKS5 端口 [默认 ${rec_s5}，填 0 关闭]: " in_s5_port
+    in_s5_port="${in_s5_port:-$rec_s5}"
+    [ "$in_s5_port" = "0" ] && in_s5_port=""
+
+    read -p "Trojan-TCP 端口 [默认 ${rec_tr}，填 0 关闭]: " in_trojan_port
+    in_trojan_port="${in_trojan_port:-$rec_tr}"
+    [ "$in_trojan_port" = "0" ] && in_trojan_port=""
   fi
 
   # 保存配置
@@ -1893,25 +2001,38 @@ menu_config() {
   local config_modified=0
   while true; do
     clear
-    local argo_st="临时隧道"
+    local cur_u cur_rp cur_rd cur_sp cur_s5 cur_tp cur_argo cur_pref cur_km cur_srv
+    cur_u="$(get_val UUID)"
+    cur_rp="$(get_val REALITY_PORT "未启用")"
+    cur_rd="$(get_val REALITY_DOMAIN "www.iij.ad.jp")"
+    cur_sp="$(get_val SS_PORT "未启用")"
+    cur_s5="$(get_val S5_PORT "未启用")"
+    cur_tp="$(get_val TROJAN_PORT "未启用")"
+
     if [ "$(get_val DISABLE_ARGO)" = "true" ]; then
-      argo_st="已禁用"
+      cur_argo="已禁用"
     elif [ -n "$(get_val ARGO_DOMAIN)" ]; then
-      argo_st="$(get_val ARGO_DOMAIN)"
+      cur_argo="$(get_val ARGO_DOMAIN)"
+    else
+      cur_argo="临时隧道"
     fi
+
+    cur_pref="$(get_val CF_PREFER_HOST "www.visa.com.tw")"
+    cur_km="$(get_val KOMARI_DOMAIN "未配置")"
+    cur_srv="$(get_val SERVER_DOMAIN "自动探测")"
 
     echo -e "${GREEN}====================================================${RESET}"
     echo -e "${WHITE}                    修改参数配置                    ${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
-    echo -e "${WHITE} 1. 用户 UUID           : ${CYAN}$(get_val UUID)${RESET}"
-    echo -e "${WHITE} 2. Reality 端口        : ${CYAN}$(get_val REALITY_PORT:-未启用)${RESET} | Reality 域名: ${CYAN}$(get_val REALITY_DOMAIN:-www.iij.ad.jp)${RESET}"
-    echo -e "${WHITE} 3. Shadowsocks 端口    : ${CYAN}$(get_val SS_PORT:-未启用)${RESET}"
-    echo -e "${WHITE} 4. SOCKS5 协议端口     : ${CYAN}$(get_val S5_PORT:-未启用)${RESET}"
-    echo -e "${WHITE} 5. Trojan 协议端口     : ${CYAN}$(get_val TROJAN_PORT:-未启用)${RESET}"
-    echo -e "${WHITE} 6. Argo 隧道管理       : ${CYAN}${argo_st}${RESET}"
-    echo -e "${WHITE} 7. CDN 优选域名        : ${CYAN}$(get_val CF_PREFER_HOST:-www.visa.com.tw)${RESET}"
-    echo -e "${WHITE} 8. Komari 探针         : ${CYAN}$(get_val KOMARI_DOMAIN:-未配置)${RESET}"
-    echo -e "${WHITE} 9. 全局连接地址        : ${CYAN}$(get_val SERVER_DOMAIN:-自动探测)${RESET}"
+    echo -e "${WHITE} 1. 用户 UUID           : ${CYAN}${cur_u}${RESET}"
+    echo -e "${WHITE} 2. Reality 端口        : ${CYAN}${cur_rp}${RESET} | 域名: ${CYAN}${cur_rd}${RESET}"
+    echo -e "${WHITE} 3. Shadowsocks 端口    : ${CYAN}${cur_sp}${RESET}"
+    echo -e "${WHITE} 4. SOCKS5 协议端口     : ${CYAN}${cur_s5}${RESET}"
+    echo -e "${WHITE} 5. Trojan 协议端口     : ${CYAN}${cur_tp}${RESET}"
+    echo -e "${WHITE} 6. Argo 隧道管理       : ${CYAN}${cur_argo}${RESET}"
+    echo -e "${WHITE} 7. CDN 优选域名        : ${CYAN}${cur_pref}${RESET}"
+    echo -e "${WHITE} 8. Komari 探针         : ${CYAN}${cur_km}${RESET}"
+    echo -e "${WHITE} 9. 全局连接地址        : ${CYAN}${cur_srv}${RESET}"
     echo -e "${WHITE} 0. 返回面板${RESET}"
     echo -e "${GREEN}====================================================${RESET}"
     read -p "请输入修改项 [0-9]: " c_opt
@@ -2083,25 +2204,26 @@ do_menu() {
 
     local x_ver="未安装"
     [ -x "$XRAY_BIN" ] && x_ver="$("$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}')"
-    local pub_ip
+    local pub_ip node_prefix
     pub_ip="$(get_public_ip)"
+    node_prefix="$(get_node_name_prefix)"
 
     echo -e "${GREEN}====================================================${RESET}"
     echo -e "${WHITE}               Xray 综合管理控制面板               ${RESET}"
     echo -e "${GRAY}系统状态: ${st_desc} | 核心版本: ${CYAN}${x_ver}${RESET}"
-    echo -e "${GRAY}公网 IP:  ${CYAN}${pub_ip}${RESET} | 目录: ${GRAY}${APP_DIR}${RESET}"
+    echo -e "${GRAY}公网地址: ${CYAN}${pub_ip}${RESET} | 节点归属: ${CYAN}${node_prefix}${RESET}"
     echo -e "${GREEN}====================================================${RESET}"
     echo -e "${WHITE} 1. 查看节点${RESET}"
     echo -e "${WHITE} 2. 查看日志${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
-    echo -e "${WHITE} 3. Xray 管理${RESET}"
-    echo -e "${WHITE} 4. Xray 更新${RESET}"
-    echo -e "${WHITE} 5. Xray 卸载${RESET}"
+    echo -e "${WHITE} 3. 服务管理${RESET}"
+    echo -e "${WHITE} 4. 升级更新${RESET}"
+    echo -e "${WHITE} 5. 卸载清除${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
     echo -e "${WHITE} 6. 修改配置${RESET}"
-    echo -e "${WHITE} 7. 设置出口${RESET}"
+    echo -e "${WHITE} 7. 出口设置${RESET}"
     echo -e "${WHITE} 8. 域名证书${RESET}"
-    echo -e "${WHITE} 9. 更新面板${RESET}"
+    echo -e "${WHITE} 9. 重置向导${RESET}"
     echo -e "${GREEN}----------------------------------------------------${RESET}"
     echo -e "${WHITE} 0. 退出面板${RESET}"
     echo -e "${GREEN}====================================================${RESET}"
@@ -2116,7 +2238,7 @@ do_menu() {
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
           do_stop
           systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
-          rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xray*
+          rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray*
           rm -rf "$APP_DIR" "$BIN_DIR"
           log "已彻底清理卸载"
           exit 0
@@ -2145,18 +2267,18 @@ case "${1:-}" in
   del)
     do_stop
     systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xray*
+    rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray*
     rm -rf "$APP_DIR" "$BIN_DIR"
     log "已卸载"
     ;;
   *)
     case "$(basename "$0")" in
-      xray-sub) show_sub ;;
-      xray-log) do_log ;;
-      xray-del)
+      xr-sub|xray-sub) show_sub ;;
+      xr-log|xray-log) do_log ;;
+      xr-del|xray-del)
         do_stop
         systemctl disable --now "$SVC_NAME" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xray*
+        rm -f "/etc/systemd/system/${SVC_NAME}.service" /usr/local/bin/xr* /usr/local/bin/xray*
         rm -rf "$APP_DIR" "$BIN_DIR"
         log "已卸载"
         ;;
