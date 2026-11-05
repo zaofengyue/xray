@@ -50,10 +50,10 @@ WHITE='\033[0;97m'
 NC='\033[0m'
 RESET='\033[0m'
 
-log()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log()  { echo -e "${GREEN}[INFO]${NC} $*" >&2; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
-info() { echo -e "${CYAN}[XRAY]${NC} $*"; }
+info() { echo -e "${CYAN}[XRAY]${NC} $*" >&2; }
 
 # ── 3. 基础目录与常量规范 ──────────────────────────────────────────────────────
 HOME_DIR="${HOME:-/root}"
@@ -166,16 +166,24 @@ nat64_recover_leftover() {
 nat64_enable_temp() {
   [ "$(id -u)" = "0" ] || return 0
   nat64_recover_leftover
+
+  # 优先实际测试连通性：若能正常访问纯 IPv4 站点 (api.github.com) 则无需挂载 NAT64
+  if command -v curl >/dev/null 2>&1; then
+    curl -4 -s --connect-timeout 2 -m 3 https://api.github.com >/dev/null 2>&1 && return 0
+  elif command -v wget >/dev/null 2>&1; then
+    wget -4 -qO- --timeout=3 https://api.github.com >/dev/null 2>&1 && return 0
+  fi
+
   local _has_v4=0
   if command -v ip >/dev/null 2>&1; then
     ip -4 route show default 2>/dev/null | grep -q default && _has_v4=1
   elif command -v route >/dev/null 2>&1; then
     route -n 2>/dev/null | grep -q '^0.0.0.0' && _has_v4=1
   fi
-  [ "$_has_v4" = "1" ] && return 0
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -s --connect-timeout 2 -m 3 https://api.github.com >/dev/null 2>&1 && return 0
+  if [ "$_has_v4" = "1" ]; then
+    if command -v ping >/dev/null 2>&1; then
+      ping -4 -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && return 0
+    fi
   fi
 
   local _rc="/etc/resolv.conf"
@@ -360,10 +368,14 @@ download_xray() {
   tmpzip="/tmp/xray_dl_$$.zip"
   download_file "$url" "$tmpzip" || { warn "下载 Xray 失败: $url"; return 1; }
 
-  # 严格校验 SHA256 安全哈希，防范中间人攻击
-  local dgst_url="${url}.dgst"
+  # 严格校验 SHA256 安全哈希，防范中间人攻击 (复用 download_file 确保纯 IPv6/NAT64 兼容)
+  local dgst_file="${tmpzip}.dgst"
   local exp_sha=""
-  exp_sha="$(curl -fsSL --retry 3 --connect-timeout 8 -m 20 "$dgst_url" 2>/dev/null | awk -F'= ' '/SHA2-256/{print $2}' | tr -d '[:space:]')"
+  if download_file "${url}.dgst" "$dgst_file"; then
+    exp_sha="$(awk -F'= ' '/SHA2-256/{print $2}' "$dgst_file" 2>/dev/null | tr -d '[:space:]')"
+    rm -f "$dgst_file"
+  fi
+
   if [ -n "$exp_sha" ] && command -v sha256sum >/dev/null 2>&1; then
     local act_sha
     act_sha="$(sha256sum "$tmpzip" 2>/dev/null | awk '{print $1}')"
@@ -374,16 +386,22 @@ download_xray() {
     fi
     log "Xray 核心 SHA256 安全校验通过 (${act_sha:0:16}...)"
   else
-    warn "未能获取 Xray 官方发布哈希或缺少 sha256sum 工具 (${dgst_url})"
-    read -p "是否在无安全哈希校验下强行继续？[y/N]: " bypass_chk
-    case "$bypass_chk" in
-      y|Y) warn "已确认跳过 SHA256 完整性校验" ;;
-      *)
-        rm -rf "$tmpzip"
-        warn "已终止未验证的二进制安装流程"
-        return 1
-        ;;
-    esac
+    warn "未能获取 Xray 官方发布哈希或缺少 sha256sum 工具"
+    if [ -t 0 ] || [ -r /dev/tty ]; then
+      read -p "是否在无安全哈希校验下强行继续？[y/N]: " bypass_chk </dev/tty
+      case "$bypass_chk" in
+        y|Y) warn "已确认跳过 SHA256 完整性校验" ;;
+        *)
+          rm -rf "$tmpzip"
+          warn "已终止未验证的二进制安装流程"
+          return 1
+          ;;
+      esac
+    else
+      warn "非交互式环境下无安全哈希可供校验，为保障安全已终止安装"
+      rm -rf "$tmpzip"
+      return 1
+    fi
   fi
   local extract_tmp="/tmp/xray_ext_$$"
   mkdir -p "$extract_tmp"
@@ -404,7 +422,12 @@ download_cloudflared() {
   url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${cfarch}"
   download_file "$url" "$CF_BIN" || { warn "下载 cloudflared 失败"; return 1; }
   chmod +x "$CF_BIN"
-  log "Cloudflared 部署就绪"
+  if ! "$CF_BIN" --version >/dev/null 2>&1; then
+    rm -f "$CF_BIN"
+    warn "cloudflared 二进制校验失败或无法在当前架构运行"
+    return 1
+  fi
+  log "Cloudflared 部署就绪: $("$CF_BIN" --version 2>/dev/null | head -1)"
   return 0
 }
 
@@ -415,6 +438,13 @@ download_komari() {
   url="https://github.com/komari-monitoring/komari-agent/releases/latest/download/komari-agent_${kmarch}"
   download_file "$url" "$KM_BIN" || { warn "下载 komari-agent 失败"; return 1; }
   chmod +x "$KM_BIN"
+  if ! "$KM_BIN" --version >/dev/null 2>&1 && ! "$KM_BIN" -v >/dev/null 2>&1 && ! "$KM_BIN" -h >/dev/null 2>&1; then
+    if [ ! -s "$KM_BIN" ]; then
+      rm -f "$KM_BIN"
+      warn "komari-agent 下载内容为空或损坏"
+      return 1
+    fi
+  fi
   log "Komari-agent 部署就绪"
   return 0
 }
@@ -444,6 +474,11 @@ download_turn2socks() {
   local url="https://github.com/zaofengyue/singbox/releases/latest/download/turn2socks-linux-${t2s_arch}"
   if download_file "$url" "$TURN2SOCKS_BIN"; then
     chmod +x "$TURN2SOCKS_BIN"
+    if [ ! -s "$TURN2SOCKS_BIN" ]; then
+      rm -f "$TURN2SOCKS_BIN"
+      warn "turn2socks 文件为空或损坏"
+      return 1
+    fi
     log "turn2socks 部署就绪"
     return 0
   fi
@@ -596,21 +631,62 @@ get_free_port() {
   get_random_high_port
 }
 
-open_firewall_ports() {
-  local p_list=("$@")
+open_firewall_port() {
+  local entry="$1" proto="${2:-}"
+  [ -z "$entry" ] && return 0
+  local p
+  if [[ "$entry" =~ ^([0-9]+)/(tcp|udp|both)$ ]]; then
+    p="${BASH_REMATCH[1]}"
+    proto="${BASH_REMATCH[2]}"
+  else
+    p="$entry"
+    proto="${proto:-both}"
+  fi
+  [ "$p" = "0" ] && return 0
   [ "$(id -u)" = "0" ] || return 0
+
+  # 1. UFW 防火墙
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
-    log "检测到 UFW 防火墙处于激活状态，正在自动放行服务端口..."
-    for p in "${p_list[@]}"; do
-      [ -n "$p" ] && [ "$p" != "0" ] && ufw allow "$p"/tcp >/dev/null 2>&1 && ufw allow "$p"/udp >/dev/null 2>&1 || true
-    done
-  elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-    log "检测到 firewalld 防火墙处于激活状态，正在自动放行服务端口..."
-    for p in "${p_list[@]}"; do
-      [ -n "$p" ] && [ "$p" != "0" ] && firewall-cmd --add-port="$p"/tcp --permanent >/dev/null 2>&1 && firewall-cmd --add-port="$p"/udp --permanent >/dev/null 2>&1 || true
-    done
+    case "$proto" in
+      tcp)  ufw allow "$p"/tcp >/dev/null 2>&1 || true ;;
+      udp)  ufw allow "$p"/udp >/dev/null 2>&1 || true ;;
+      *)    ufw allow "$p"/tcp >/dev/null 2>&1 || true; ufw allow "$p"/udp >/dev/null 2>&1 || true ;;
+    esac
+  fi
+
+  # 2. firewalld 防火墙
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+    case "$proto" in
+      tcp)  firewall-cmd --add-port="$p"/tcp --permanent >/dev/null 2>&1 || true ;;
+      udp)  firewall-cmd --add-port="$p"/udp --permanent >/dev/null 2>&1 || true ;;
+      *)    firewall-cmd --add-port="$p"/tcp --permanent >/dev/null 2>&1 || true; firewall-cmd --add-port="$p"/udp --permanent >/dev/null 2>&1 || true ;;
+    esac
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
+
+  # 3. 原生 iptables / ip6tables (适配 Oracle Linux 等自带 strict DROP 拦截规则的云主机镜像)
+  if command -v iptables >/dev/null 2>&1; then
+    case "$proto" in
+      tcp)  iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
+      udp)  iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
+      *)    iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
+            iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
+    esac
+  fi
+  if command -v ip6tables >/dev/null 2>&1; then
+    case "$proto" in
+      tcp)  ip6tables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
+      udp)  ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
+      *)    ip6tables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
+            ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || true ;;
+    esac
+  fi
+}
+
+open_firewall_ports() {
+  for item in "$@"; do
+    open_firewall_port "$item"
+  done
 }
 
 wait_port() {
@@ -655,7 +731,7 @@ get_public_ip() {
 get_node_name_prefix() {
   local custom_name
   custom_name="$(get_val NAME)"
-  if [ -n "$custom_name" ] && [ "$custom_name" != "xray" ] && [ "$custom_name" != "xr" ]; then
+  if [ -n "$custom_name" ] && [ "$custom_name" != "xray" ] && [ "$custom_name" != "xr" ] && [ "$custom_name" != "xr-Node" ]; then
     echo "$custom_name"
     return
   fi
@@ -669,25 +745,37 @@ get_node_name_prefix() {
   local country="" org="" raw_json=""
 
   # 1. 优先尝试 api.ip.sb/geoip (IPv4/IPv6 双栈高速)
-  raw_json="$(curl -sL --max-time 4 https://api.ip.sb/geoip 2>/dev/null || wget -qO- --timeout=4 https://api.ip.sb/geoip 2>/dev/null || true)"
+  raw_json="$(curl -sL -A "Mozilla/5.0" --connect-timeout 3 -m 6 https://api.ip.sb/geoip 2>/dev/null || wget -qO- -U "Mozilla/5.0" --timeout=6 https://api.ip.sb/geoip 2>/dev/null || true)"
   if [ -n "$raw_json" ]; then
     country="$(echo "$raw_json" | grep -o '"country_code":"[^"]*"' | head -1 | cut -d'"' -f4)"
     org="$(echo "$raw_json" | grep -o '"asn_organization":"[^"]*"' | head -1 | cut -d'"' -f4)"
     [ -z "$org" ] && org="$(echo "$raw_json" | grep -o '"isp":"[^"]*"' | head -1 | cut -d'"' -f4)"
+    [ -z "$org" ] && org="$(echo "$raw_json" | grep -o '"organization":"[^"]*"' | head -1 | cut -d'"' -f4)"
   fi
 
-  # 2. 备用尝试 ipwho.is
+  # 2. 备用尝试 ipwho.is (IPv4/IPv6 双栈)
   if [ -z "$country" ] || [ -z "$org" ]; then
-    raw_json="$(curl -sL --max-time 4 https://ipwho.is 2>/dev/null || wget -qO- --timeout=4 https://ipwho.is 2>/dev/null || true)"
+    raw_json="$(curl -sL -A "Mozilla/5.0" --connect-timeout 3 -m 6 https://ipwho.is 2>/dev/null || wget -qO- -U "Mozilla/5.0" --timeout=6 https://ipwho.is 2>/dev/null || true)"
     if [ -n "$raw_json" ]; then
       [ -z "$country" ] && country="$(echo "$raw_json" | grep -o '"country_code":"[^"]*"' | head -1 | cut -d'"' -f4)"
+      [ -z "$org" ] && org="$(echo "$raw_json" | grep -o '"org":"[^"]*"' | head -1 | cut -d'"' -f4)"
       [ -z "$org" ] && org="$(echo "$raw_json" | grep -o '"isp":"[^"]*"' | head -1 | cut -d'"' -f4)"
     fi
   fi
 
-  # 3. 备用尝试 ipinfo.io
+  # 3. 备用尝试 ip-api.com
   if [ -z "$country" ] || [ -z "$org" ]; then
-    raw_json="$(curl -sL --max-time 4 https://ipinfo.io/json 2>/dev/null || wget -qO- --timeout=4 https://ipinfo.io/json 2>/dev/null || true)"
+    raw_json="$(curl -sL -A "Mozilla/5.0" --connect-timeout 3 -m 6 http://ip-api.com/json 2>/dev/null || wget -qO- -U "Mozilla/5.0" --timeout=6 http://ip-api.com/json 2>/dev/null || true)"
+    if [ -n "$raw_json" ]; then
+      [ -z "$country" ] && country="$(echo "$raw_json" | grep -o '"countryCode":"[^"]*"' | head -1 | cut -d'"' -f4)"
+      [ -z "$org" ] && org="$(echo "$raw_json" | grep -o '"org":"[^"]*"' | head -1 | cut -d'"' -f4)"
+      [ -z "$org" ] && org="$(echo "$raw_json" | grep -o '"isp":"[^"]*"' | head -1 | cut -d'"' -f4)"
+    fi
+  fi
+
+  # 4. 备用尝试 ipinfo.io
+  if [ -z "$country" ] || [ -z "$org" ]; then
+    raw_json="$(curl -sL -A "Mozilla/5.0" --connect-timeout 3 -m 6 https://ipinfo.io/json 2>/dev/null || wget -qO- -U "Mozilla/5.0" --timeout=6 https://ipinfo.io/json 2>/dev/null || true)"
     if [ -n "$raw_json" ]; then
       [ -z "$country" ] && country="$(echo "$raw_json" | grep -o '"country":"[^"]*"' | head -1 | cut -d'"' -f4)"
       [ -z "$org" ] && org="$(echo "$raw_json" | grep -o '"org":"[^"]*"' | head -1 | cut -d'"' -f4)"
@@ -703,9 +791,9 @@ get_node_name_prefix() {
   if [ -n "$country" ] && [ -n "$org" ]; then
     name_tag="${country}-${org}"
   elif [ -n "$country" ]; then
-    name_tag="${country}-xr"
+    name_tag="${country}-Node"
   else
-    name_tag="xr"
+    name_tag="xr-Node"
   fi
   set_val NAME "$name_tag"
   echo "$name_tag"
@@ -1192,8 +1280,7 @@ EOF
       read -p "用户名 (留空无认证): " t_user
       local t_pass=""
       [ -n "$t_user" ] && read -p "密码: " t_pass
-      read -p "本地 SOCKS5 转接端口 [默认 10808]: " t_lport
-      t_lport="${t_lport:-10808}"
+      t_lport="$(prompt_port "本地 SOCKS5 转接端口 [默认 10808]: " "10808")"
       if [ -n "$t_host" ]; then
         local r_m
         r_m="$(prompt_route_mode)"
@@ -1445,7 +1532,12 @@ EOF
       "settings": {
         "auth": "password",
         "accounts": [{ "user": "'"$s5_user"'", "pass": "'"$s5_pass"'" }],
-        "udp": true
+        "udp": true,
+        "ip": "'"$pub_ip"'"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"]
       }
     }'
   fi
@@ -1534,6 +1626,9 @@ EOF
     p_p="$(grep '^PORT=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
     p_u="$(grep '^USER=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
     p_pass="$(grep '^PASS=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
+    if ! [[ "$p_p" =~ ^[0-9]+$ ]] || [ "$p_p" -lt 1 ] || [ "$p_p" -gt 65535 ]; then
+      p_p=1080
+    fi
     local u_block=""
     if [ -n "$p_u" ]; then
       local esc_u esc_pass
@@ -1562,7 +1657,9 @@ EOF
     active_outbound_tag="turn-out"
     local t_lp
     t_lp="$(grep '^LOCAL_PORT=' "$OUTBOUND_FILE" | cut -d'=' -f2-)"
-    [ -z "$t_lp" ] && t_lp=10808
+    if ! [[ "$t_lp" =~ ^[0-9]+$ ]] || [ "$t_lp" -lt 1 ] || [ "$t_lp" -gt 65535 ]; then
+      t_lp=10808
+    fi
     local turn_block='    {
       "tag": "turn-out",
       "protocol": "socks",
@@ -1664,11 +1761,10 @@ generate_sub() {
 
     # 仅固定隧道且域名验证通过时启用 Argo VLESS-xhttp
     if $is_fixed_argo; then
-      links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=auto&sni=${argo_domain}#${name}")
-      local c_n
-      c_n="$(next_clash_name)"
-      clash_names+=("\"${c_n}\"")
-      clash_proxies+=("  - name: \"${c_n}\"
+      local n_argo_xh="${name}-Argo-xhttp"
+      links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=auto&sni=${argo_domain}#${n_argo_xh}")
+      clash_names+=("\"${n_argo_xh}\"")
+      clash_proxies+=("  - name: \"${n_argo_xh}\"
     type: vless
     server: ${prefer_host}
     port: 443
@@ -1685,11 +1781,10 @@ generate_sub() {
     fi
 
     # VLESS-WS
-    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=ws&host=${argo_domain}&path=%2Fvless-ws&sni=${argo_domain}#${name}")
-    local c_n
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    local n_argo_vless="${name}-Argo-VLESS"
+    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=ws&host=${argo_domain}&path=%2Fvless-ws&sni=${argo_domain}#${n_argo_vless}")
+    clash_names+=("\"${n_argo_vless}\"")
+    clash_proxies+=("  - name: \"${n_argo_vless}\"
     type: vless
     server: ${prefer_host}
     port: 443
@@ -1704,12 +1799,12 @@ generate_sub() {
         Host: ${argo_domain}")
 
     # VMess-WS
+    local n_argo_vmess="${name}-Argo-VMess"
     local vm_json
-    vm_json="$(printf '{"v":"2","ps":"%s","add":"%s","port":"443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"/vmess-ws","tls":"tls","sni":"%s"}' "$name" "$prefer_host" "$uuid" "$argo_domain" "$argo_domain")"
+    vm_json="$(printf '{\"v\":\"2\",\"ps\":\"%s\",\"add\":\"%s\",\"port\":\"443\",\"id\":\"%s\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"%s\",\"path\":\"/vmess-ws\",\"tls\":\"tls\",\"sni\":\"%s\"}' "$n_argo_vmess" "$prefer_host" "$uuid" "$argo_domain" "$argo_domain")"
     links+=("vmess://$(b64 "$vm_json")")
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    clash_names+=("\"${n_argo_vmess}\"")
+    clash_proxies+=("  - name: \"${n_argo_vmess}\"
     type: vmess
     server: ${prefer_host}
     port: 443
@@ -1726,10 +1821,10 @@ generate_sub() {
         Host: ${argo_domain}")
 
     # Trojan-WS
-    links+=("trojan://${uuid}@${prefer_host}:443?security=tls&type=ws&host=${argo_domain}&path=%2Ftrojan-ws&sni=${argo_domain}#${name}")
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    local n_argo_tr="${name}-Argo-Trojan"
+    links+=("trojan://${uuid}@${prefer_host}:443?security=tls&type=ws&host=${argo_domain}&path=%2Ftrojan-ws&sni=${argo_domain}#${n_argo_tr}")
+    clash_names+=("\"${n_argo_tr}\"")
+    clash_proxies+=("  - name: \"${n_argo_tr}\"
     type: trojan
     server: ${prefer_host}
     port: 443
@@ -1754,11 +1849,10 @@ generate_sub() {
   if [ -n "$reality_port" ] && [ -n "$reality_pub" ] && [ -n "$pub_ip" ]; then
     local r_host="${node_host#[}"
     r_host="${r_host%]}"
-    links+=("vless://${uuid}@${node_host}:${reality_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&type=tcp#${name}")
-    local c_n
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    local n_r_tcp="${name}-Reality-TCP"
+    links+=("vless://${uuid}@${node_host}:${reality_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&type=tcp#${n_r_tcp}")
+    clash_names+=("\"${n_r_tcp}\"")
+    clash_proxies+=("  - name: \"${n_r_tcp}\"
     type: vless
     server: ${r_host}
     port: ${reality_port}
@@ -1780,11 +1874,10 @@ generate_sub() {
   if [ -n "$xhttp_port" ] && [ -n "$reality_pub" ] && [ -n "$pub_ip" ]; then
     local rx_host="${node_host#[}"
     rx_host="${rx_host%]}"
-    links+=("vless://${uuid}@${node_host}:${xhttp_port}?encryption=none&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&type=xhttp&path=%2Fxhttp&mode=auto#${name}")
-    local c_n
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    local n_r_xh="${name}-Reality-xhttp"
+    links+=("vless://${uuid}@${node_host}:${xhttp_port}?encryption=none&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&type=xhttp&path=%2Fxhttp&mode=auto#${n_r_xh}")
+    clash_names+=("\"${n_r_xh}\"")
+    clash_proxies+=("  - name: \"${n_r_xh}\"
     type: vless
     server: ${rx_host}
     port: ${xhttp_port}
@@ -1810,13 +1903,12 @@ generate_sub() {
   if [ -n "$ss_port" ] && [ -n "$pub_ip" ]; then
     local ss_uinfo
     ss_uinfo="$(b64 "2022-blake3-aes-128-gcm:${ss_pass}")"
-    links+=("ss://${ss_uinfo}@${node_host}:${ss_port}#${name}")
+    local n_ss="${name}-SS-2022"
+    links+=("ss://${ss_uinfo}@${node_host}:${ss_port}#${n_ss}")
     local s_host="${node_host#[}"
     s_host="${s_host%]}"
-    local c_n
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    clash_names+=("\"${n_ss}\"")
+    clash_proxies+=("  - name: \"${n_ss}\"
     type: ss
     server: ${s_host}
     port: ${ss_port}
@@ -1832,13 +1924,12 @@ generate_sub() {
   if [ -n "$s5_port" ] && [ -n "$pub_ip" ]; then
     local s_host="${node_host#[}"
     s_host="${s_host%]}"
-    links+=("socks5://${s5_user}:${s5_pass}@${node_host}:${s5_port}#${name}")
+    local n_s5="${name}-Socks5"
+    links+=("socks5://${s5_user}:${s5_pass}@${node_host}:${s5_port}#${n_s5}")
     echo "tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}" > "$TG_S5_FILE"
     chmod 600 "$TG_S5_FILE" 2>/dev/null || true
-    local c_n
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    clash_names+=("\"${n_s5}\"")
+    clash_proxies+=("  - name: \"${n_s5}\"
     type: socks5
     server: ${s_host}
     port: ${s5_port}
@@ -1862,13 +1953,12 @@ generate_sub() {
       tr_insec="1"
       skip_cert="true"
     fi
-    links+=("trojan://${uuid}@${node_host}:${trojan_port}?security=tls&sni=${tr_sni}&allowInsecure=${tr_insec}#${name}")
+    local n_tr="${name}-Trojan-TCP"
+    links+=("trojan://${uuid}@${node_host}:${trojan_port}?security=tls&sni=${tr_sni}&allowInsecure=${tr_insec}#${n_tr}")
     local tr_host="${node_host#[}"
     tr_host="${tr_host%]}"
-    local c_n
-    c_n="$(next_clash_name)"
-    clash_names+=("\"${c_n}\"")
-    clash_proxies+=("  - name: \"${c_n}\"
+    clash_names+=("\"${n_tr}\"")
+    clash_proxies+=("  - name: \"${n_tr}\"
     type: trojan
     server: ${tr_host}
     port: ${trojan_port}
@@ -2380,7 +2470,11 @@ do_install() {
   set_val S5_PASS "${in_s5_pass:-}"
   set_val TROJAN_PORT "${in_trojan_port:-}"
 
-  open_firewall_ports "$in_reality_port" "$in_xhttp_port" "$in_ss_port" "$in_s5_port" "$in_trojan_port"
+  open_firewall_port "$in_reality_port" tcp
+  open_firewall_port "$in_xhttp_port" tcp
+  open_firewall_port "$in_trojan_port" tcp
+  open_firewall_port "$in_ss_port" both
+  open_firewall_port "$in_s5_port" both
 
   log "正在准备组件与二进制核心..."
   ensure_binaries
@@ -2660,7 +2754,8 @@ menu_config() {
           set_val REALITY_DOMAIN "${new_rd:-www.iij.ad.jp}"
           rm -f "$REALITY_KEY_FILE"
         fi
-        open_firewall_ports "$new_rp" "$new_xp"
+        [ -n "$new_rp" ] && open_firewall_port "$new_rp" tcp
+        [ -n "$new_xp" ] && open_firewall_port "$new_xp" tcp
         config_modified=1
         log "Reality 配置已更新"
         sleep 1
@@ -2679,7 +2774,7 @@ menu_config() {
           read -p "Shadowsocks 密码 [留空随机生成]: " new_pass
           new_pass="$(get_ss2022_key "$new_pass")"
           set_val SS_PASS "$new_pass"
-          open_firewall_ports "$new_sp"
+          open_firewall_port "$new_sp" both
         fi
         config_modified=1
         log "Shadowsocks 配置已更新"
@@ -2702,7 +2797,7 @@ menu_config() {
           set_val S5_USER "${new_s5_u:-$cur_s5_u}"
           read -p "SOCKS5 密码 [默认 ${cur_s5_p}]: " new_s5_p
           set_val S5_PASS "${new_s5_p:-$cur_s5_p}"
-          open_firewall_ports "$new_s5"
+          open_firewall_port "$new_s5" both
         fi
         config_modified=1
         log "SOCKS5 配置已更新"
@@ -2718,7 +2813,7 @@ menu_config() {
           continue
         fi
         set_val TROJAN_PORT "$new_tp"
-        [ -n "$new_tp" ] && open_firewall_ports "$new_tp"
+        [ -n "$new_tp" ] && open_firewall_port "$new_tp" tcp
         config_modified=1
         log "Trojan 配置已更新"
         sleep 1
@@ -2907,7 +3002,7 @@ do_uninstall() {
       done
       # 仅精准清理本安装目录下的 acme.sh 证书续签与 xray 守护任务，绝不影响系统其他任务
       if [ -n "$ACME_HOME" ] && [ -n "$APP_DIR" ] && command -v crontab >/dev/null 2>&1; then
-        (crontab -l 2>/dev/null | grep -vF "$ACME_HOME" | grep -vF "$APP_DIR" | crontab - 2>/dev/null) || true
+        (crontab -l 2>/dev/null | grep -vF "${ACME_HOME}/" | grep -vF "${APP_DIR}/" | crontab - 2>/dev/null) || true
       fi
       rm -rf "$APP_DIR"
       log "已彻底清理并完成卸载"
