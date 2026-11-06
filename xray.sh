@@ -136,6 +136,20 @@ escape_json() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# URI percent-encode：对 user/pass 中影响 URI 解析的特殊字符做编码
+# 仅编码 : @ / ? # [ ] & = + % 空格，字母数字及 - _ . ~ 保持原样
+uri_encode() {
+  local str="$1" out="" i ch hex
+  for (( i=0; i<${#str}; i++ )); do
+    ch="${str:$i:1}"
+    case "$ch" in
+      [A-Za-z0-9\-_.~]) out+="$ch" ;;
+      *) printf -v hex '%02X' "'$ch"; out+="%${hex}" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 load_env() {
   [ -f "$ENV_FILE" ] || return 0
   local k v
@@ -2069,10 +2083,14 @@ EOF
 EOF
 
   # 处理 Outbound 出口与分流策略
-  local out_type="" out_route_mode="direct" active_outbound_tag=""
+  local out_type="" out_route_mode="" active_outbound_tag=""
   if [ -f "$OUTBOUND_FILE" ]; then
     out_type="$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
     out_route_mode="$(grep '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  fi
+  # ROUTE_MODE 缺失时：warp/socks/http/turn 均默认全局代理；其余视为直连
+  if [ -z "$out_route_mode" ] && [ -n "$out_type" ] && [ "$out_type" != "direct" ]; then
+    out_route_mode="global"
   fi
 
   local first_outbound=1
@@ -2438,7 +2456,10 @@ generate_sub() {
     local s_host="${node_host#[}"
     s_host="${s_host%]}"
     local n_s5="${name}-Socks5"
-    links+=("socks5://${s5_user}:${s5_pass}@${node_host}:${s5_port}#${n_s5}")
+    local enc_s5_user enc_s5_pass
+    enc_s5_user="$(uri_encode "$s5_user")"
+    enc_s5_pass="$(uri_encode "$s5_pass")"
+    links+=("socks5://${enc_s5_user}:${enc_s5_pass}@${node_host}:${s5_port}#${n_s5}")
     echo "tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}" > "$TG_S5_FILE"
     chmod 600 "$TG_S5_FILE" 2>/dev/null || true
     clash_names+=("\"${n_s5}\"")
@@ -3540,7 +3561,7 @@ menu_config() {
               sleep 0.5
               continue
             fi
-            read -s -p "Argo Token [回车取消]: " in_at
+            read -r -p "Argo Token [回车取消]: " in_at
             echo ""
             in_at="$(printf '%s' "$in_at" | tr -d '[:space:]')"
             if [ -z "$in_at" ]; then
@@ -3594,7 +3615,7 @@ menu_config() {
           log "Komari 探针已关闭"
           sleep 0.5
         elif [ -n "$in_kd" ]; then
-          read -s -p "Komari Token: " in_kt
+          read -r -p "Komari Token: " in_kt
           echo ""
           in_kt="$(printf '%s' "$in_kt" | tr -d '[:space:]')"
           set_val KOMARI_DOMAIN "$in_kd"
