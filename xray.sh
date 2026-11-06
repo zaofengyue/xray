@@ -136,18 +136,39 @@ escape_json() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# URI percent-encode：对 user/pass 中影响 URI 解析的特殊字符做编码
-# 仅编码 : @ / ? # [ ] & = + % 空格，字母数字及 - _ . ~ 保持原样
-uri_encode() {
-  local str="$1" out="" i ch hex
-  for (( i=0; i<${#str}; i++ )); do
-    ch="${str:$i:1}"
-    case "$ch" in
-      [A-Za-z0-9\-_.~]) out+="$ch" ;;
-      *) printf -v hex '%02X' "'$ch"; out+="%${hex}" ;;
-    esac
-  done
-  printf '%s' "$out"
+# URL-Safe Base64 编码（无填充 =），用于订阅链接中的 user:pass 凭据
+b64_urlsafe() {
+  printf '%s' "$1" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '='
+}
+
+# 读取令牌/长字符串：回显可见、启用 readline（支持粘贴、方向键与退格编辑）；
+# 自动去掉 \r、首尾空白与引号；若粘贴了 Cloudflare 面板里的整条命令
+# (cloudflared ... install <token>)，只取最后一段。
+read_token() {
+  local prompt="$1" __rt_var="$2" __rt_raw=""
+  IFS= read -r -e -p "$prompt" __rt_raw
+  __rt_raw="${__rt_raw//$'\r'/}"
+  __rt_raw="$(printf '%s' "$__rt_raw" | awk '{print $NF}')"
+  __rt_raw="${__rt_raw#\"}"; __rt_raw="${__rt_raw%\"}"
+  __rt_raw="${__rt_raw#\'}"; __rt_raw="${__rt_raw%\'}"
+  printf -v "$__rt_var" '%s' "$__rt_raw"
+}
+
+# 规范化主机名：去掉 http(s):// 前缀、路径与空白
+normalize_host() {
+  local h="$1"
+  h="$(printf '%s' "$h" | tr -d '[:space:]')"
+  h="${h#http://}"; h="${h#https://}"
+  h="${h%%/*}"
+  printf '%s' "$h"
+}
+
+# Argo Tunnel Token 为 base64 编码的 JSON，通常以 eyJ 开头；格式明显不符时给出提示（不强制拒绝）
+warn_if_odd_argo_token() {
+  local t="$1"
+  if [ -n "$t" ] && { [ "${#t}" -lt 60 ] || [[ "$t" != eyJ* ]]; }; then
+    warn "该 Token 看起来不像 Cloudflare Tunnel Token（通常以 eyJ 开头、长度 100+），请确认复制完整"
+  fi
 }
 
 load_env() {
@@ -1544,6 +1565,126 @@ menu_domain_cert() {
 }
 
 # ── 11. Cloudflare WARP WireGuard 原生出口与智能分流 ───────────────────────────
+
+# WireGuard 私钥必须是 32 字节标准 Base64（44 字符，以 = 结尾）
+is_valid_wg_key() {
+  local k="$1"
+  [[ "$k" =~ ^[A-Za-z0-9+/]{43}=$ ]] || return 1
+  [ "$(printf '%s' "$k" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" = "32" ]
+}
+
+# ── 出口变更：备份 / 回滚 / 提交 ──
+OUTBOUND_BAK_STATE="none"
+outbound_backup() {
+  OUTBOUND_BAK_STATE="none"
+  if [ -f "$OUTBOUND_FILE" ]; then
+    cp -f "$OUTBOUND_FILE" "$OUTBOUND_FILE.bak" 2>/dev/null && OUTBOUND_BAK_STATE="file"
+  fi
+}
+outbound_rollback() {
+  if [ "$OUTBOUND_BAK_STATE" = "file" ] && [ -f "$OUTBOUND_FILE.bak" ]; then
+    mv -f "$OUTBOUND_FILE.bak" "$OUTBOUND_FILE"
+  else
+    rm -f "$OUTBOUND_FILE" "$OUTBOUND_FILE.bak"
+  fi
+}
+outbound_commit() { rm -f "$OUTBOUND_FILE.bak" 2>/dev/null || true; }
+
+# 用一个临时 Xray 实例 + 本地 SOCKS 入站，强制流量走指定出口，真实检测该出口是否可用。
+# 不影响正在运行的服务；检测地址可用环境变量 OUTBOUND_VERIFY_URL 覆盖。
+verify_outbound_effect() {
+  local tag="$1" url="${OUTBOUND_VERIFY_URL:-https://www.cloudflare.com/cdn-cgi/trace}"
+  [ -x "$XRAY_BIN" ] && [ -f "$CONFIG_FILE" ] || return 0
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "缺少 curl，跳过出口生效检测"
+    return 0
+  fi
+  local ob work vport vpid i body="" ip warp loc rc=0
+  ob="$(awk '/^  "outbounds": \[/{f=1} f{print} f&&/^  \],?$/{exit}' "$CONFIG_FILE")"
+  [ -n "$ob" ] || return 0
+  work="$(mktemp -d "$APP_DIR/.vf.XXXXXX" 2>/dev/null)" || return 0
+  chmod 700 "$work"
+  vport="$(get_random_high_port)"
+  {
+    echo '{ "log": { "loglevel": "warning" },'
+    echo '  "inbounds": [{ "tag": "verify-in", "listen": "127.0.0.1", "port": '"$vport"', "protocol": "socks", "settings": { "auth": "noauth", "udp": false } }],'
+    printf '%s\n' "$ob" | sed '$ s/,[[:space:]]*$//'
+    echo '  ,"routing": { "rules": [{ "type": "field", "inboundTag": ["verify-in"], "outboundTag": "'"$tag"'" }] }'
+    echo '}'
+  } > "$work/v.json"
+
+  log "正在检测出口是否真正生效（经 ${tag} 访问 ${url##*//}，最长约 25 秒）..."
+  XRAY_LOCATION_ASSET="$BIN_DIR" "$XRAY_BIN" run -config "$work/v.json" > "$work/x.log" 2>&1 &
+  vpid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    (exec 3<>"/dev/tcp/127.0.0.1/$vport") 2>/dev/null && break
+    kill -0 "$vpid" 2>/dev/null || break
+    sleep 0.3
+  done
+  body="$(curl -s --max-time 20 --socks5-hostname "127.0.0.1:$vport" "$url" 2>/dev/null || true)"
+  kill "$vpid" 2>/dev/null || true
+  wait "$vpid" 2>/dev/null || true
+
+  ip="$(printf '%s\n' "$body" | sed -n 's/^ip=//p' | head -1)"
+  warp="$(printf '%s\n' "$body" | sed -n 's/^warp=//p' | head -1)"
+  loc="$(printf '%s\n' "$body" | sed -n 's/^loc=//p' | head -1)"
+  if [ "$tag" = "warp-out" ]; then
+    if [ "$warp" = "on" ] || [ "$warp" = "plus" ]; then
+      log "WARP 出口已生效 ✓  出口 IP: ${ip:-未知} (${loc:-?})  warp=${warp}"
+    elif [ -n "$body" ]; then
+      warn "出口已连通，但 Cloudflare 未识别为 WARP（warp=${warp:-未知}，出口 IP ${ip:-未知}）。多为凭据/RESERVED 不正确，建议在 WARP 菜单选择「重新注册新账号」"
+      rc=1
+    else
+      warn "WARP 出口不通：经 WARP 无法访问 Cloudflare。常见原因：VPS 封锁了到 engage.cloudflareclient.com:2408 的 UDP 出站、DNS 无法解析该域名，或凭据失效（可尝试重新注册）"
+      rc=1
+      [ -s "$work/x.log" ] && warn "Xray 日志: $(grep -v '\[Info\]\|\[Warning\]' "$work/x.log" | tail -2 | tr '\n' ' ')"
+    fi
+  else
+    if [ -n "$ip" ]; then
+      log "出口已生效 ✓  经该出口访问的出口 IP: ${ip} (${loc:-?})"
+    elif [ -n "$body" ]; then
+      log "出口可连通（已收到响应）"
+    else
+      warn "出口检测失败：经该出口无法访问外网，请检查出口地址/端口/账号密码是否正确"
+      rc=1
+      [ -s "$work/x.log" ] && warn "Xray 日志: $(grep -v '\[Info\]\|\[Warning\]' "$work/x.log" | tail -2 | tr '\n' ' ')"
+    fi
+  fi
+  rm -rf "$work"
+  return "$rc"
+}
+
+# 应用出口配置：先在前台生成并校验，失败则回滚并显示 Xray 报错；成功后重启并做真实生效检测。
+# 参数: 出口标签（warp-out 或 proxy-out）
+apply_outbound_change() {
+  local tag="$1"
+  if ! generate_config; then
+    outbound_rollback
+    warn "出口配置未能通过 Xray 校验，已回滚到修改前的设置（当前运行中的配置未受影响）"
+    return 1
+  fi
+  do_restart
+  sleep 1
+  if ! verify_outbound_effect "$tag"; then
+    local ans=""
+    read -r -p "出口检测未通过：继续使用会导致对应流量无法访问。是否回滚到修改前的设置？[Y/n]: " ans
+    if [ "${ans:-Y}" != "n" ] && [ "${ans:-Y}" != "N" ]; then
+      outbound_rollback
+      generate_config >/dev/null 2>&1 || true
+      do_restart
+      warn "已回滚到修改前的出口设置"
+      return 1
+    fi
+  fi
+  outbound_commit
+  local m
+  m="$(grep '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+  if [ "$m" = "split" ]; then
+    echo -e "${YELLOW}提示: 当前为【智能分流】，仅 OpenAI/Gemini/Netflix/Disney/Spotify/HBO 走该出口，其他网站仍显示本机 IP。需要全部流量走出口请切换为【全局代理】。${RESET}"
+  fi
+  return 0
+}
+
 setup_warp_outbound() {
   clear
   echo -e "${GREEN}==================== 设置 Cloudflare WARP 原生出口 ====================${RESET}"
@@ -1585,6 +1726,13 @@ setup_warp_outbound() {
     if [ -z "$priv_key" ] || [ -z "$pub_key" ]; then
       read -p "自动生成失败，请手动输入 WireGuard PrivateKey: " priv_key
       read -p "请输入 WireGuard PublicKey: " pub_key
+    fi
+
+    # 校验私钥格式（xray -test 查不出无效私钥，只会运行时报错）
+    if ! is_valid_wg_key "$priv_key"; then
+      warn "WireGuard PrivateKey 格式无效（应为 44 字符标准 Base64），已中止注册"
+      press_any_key
+      return 1
     fi
 
     log "正在向 Cloudflare Client API 官方注册设备凭据..."
@@ -1636,13 +1784,14 @@ EOF
   local r_mode
   r_mode="$(prompt_route_mode)"
 
+  outbound_backup
   cat > "$OUTBOUND_FILE" << EOF
 TYPE=warp
 ROUTE_MODE=${r_mode}
 EOF
   chmod 600 "$OUTBOUND_FILE"
-  log "WARP 出口配置已就绪，正在重启 Xray 服务生效..."
-  do_restart
+  log "WARP 出口配置已就绪，正在校验并重启 Xray 服务..."
+  apply_outbound_change warp-out
   press_any_key
 }
 
@@ -1715,7 +1864,7 @@ menu_outbound() {
       fi
       local r_m
       r_m="$(prompt_route_mode)"
-      stop_turn2socks 2>/dev/null || true
+      outbound_backup
       cat > "$OUTBOUND_FILE" << EOF
 TYPE=${proto}
 HOST=${p_host}
@@ -1725,8 +1874,8 @@ PASS=${p_pass}
 ROUTE_MODE=${r_m}
 EOF
       chmod 600 "$OUTBOUND_FILE"
-      log "${proto^^} 出口配置已保存，正在重启服务生效..."
-      do_restart
+      log "${proto^^} 出口配置已保存，正在校验并重启服务..."
+      apply_outbound_change proxy-out && { stop_turn2socks 2>/dev/null || true; }
       press_any_key
       ;;
     3)
@@ -1754,6 +1903,7 @@ EOF
       if [ -n "$t_host" ]; then
         local r_m
         r_m="$(prompt_route_mode)"
+        outbound_backup
         cat > "$OUTBOUND_FILE" << EOF
 TYPE=turn
 HOST=${t_host}
@@ -1765,9 +1915,9 @@ ROUTE_MODE=${r_m}
 EOF
         chmod 600 "$OUTBOUND_FILE"
         stop_turn2socks 2>/dev/null || true
-        log "TURN 出口配置已保存，正在启动 turn2socks 并重启服务..."
+        log "TURN 出口配置已保存，正在启动 turn2socks 并校验、重启服务..."
         start_turn2socks
-        do_restart
+        apply_outbound_change proxy-out || stop_turn2socks 2>/dev/null || true
         press_any_key
       fi
       ;;
@@ -1778,8 +1928,10 @@ EOF
       if [ ! -f "$OUTBOUND_FILE" ]; then
         warn "当前未设置任何外置出口，无法切换分流模式"
       else
-        local new_mode
+        local new_mode cur_t_tag="proxy-out"
         new_mode="$(prompt_route_mode)"
+        [ "$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)" = "warp" ] && cur_t_tag="warp-out"
+        outbound_backup
         if grep -q '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null; then
           sed -i "s/^ROUTE_MODE=.*/ROUTE_MODE=${new_mode}/" "$OUTBOUND_FILE"
         else
@@ -1787,8 +1939,8 @@ EOF
         fi
         local m_desc="智能分流"
         [ "$new_mode" = "global" ] && m_desc="全局代理"
-        log "分流模式已切换为: ${m_desc}，正在重启服务生效..."
-        do_restart
+        log "分流模式已切换为: ${m_desc}，正在校验并重启服务..."
+        apply_outbound_change "$cur_t_tag"
       fi
       press_any_key
       ;;
@@ -2123,7 +2275,9 @@ EOF
           "publicKey": "'"$w_peer"'",
           "endpoint": "'"$w_end"'"
         }],
-        "reserved": ['"$w_res"']
+        "reserved": ['"$w_res"'],
+        "mtu": 1280,
+        "noKernelTun": true
       }
     }'
 
@@ -2248,12 +2402,17 @@ EOF
 EOF
   chmod 600 "$tmp_cfg"
   if [ -x "$XRAY_BIN" ]; then
-    if "$XRAY_BIN" run -test -format json -config "$tmp_cfg" >/dev/null 2>&1; then
+    local test_out
+    test_out="$("$XRAY_BIN" run -test -format json -config "$tmp_cfg" 2>&1)"
+    if [ $? -eq 0 ]; then
       mv -f "$tmp_cfg" "$CONFIG_FILE"
       chmod 600 "$CONFIG_FILE"
       return 0
     else
       warn "新生成的 Xray 配置文件未能通过语法测试，已保留原配置以防止崩溃"
+      local _why
+      _why="$(printf '%s\n' "$test_out" | grep -v '\[Warning\]\|\[Info\]\|^Xray \|^A unified' | tail -3)"
+      [ -n "$_why" ] && warn "Xray 报错: ${_why}"
       rm -f "$tmp_cfg"
       return 1
     fi
@@ -2456,11 +2615,15 @@ generate_sub() {
     local s_host="${node_host#[}"
     s_host="${s_host%]}"
     local n_s5="${name}-Socks5"
-    local enc_s5_user enc_s5_pass
-    enc_s5_user="$(uri_encode "$s5_user")"
-    enc_s5_pass="$(uri_encode "$s5_pass")"
-    links+=("socks5://${enc_s5_user}:${enc_s5_pass}@${node_host}:${s5_port}#${n_s5}")
-    echo "tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}" > "$TG_S5_FILE"
+    # 订阅内使用 v2rayN/v2rayNG/Shadowrocket 通用的 socks://base64(user:pass)@host:port 格式
+    # (v2rayN 自己的导出格式与此一致；旧版本不识别 socks5:// 前缀，直接导入会失败)。
+    # 标准 socks5:// 与 Telegram 链接另存，供其他客户端使用。
+    local s5_cred
+    s5_cred="$(b64_urlsafe "${s5_user}:${s5_pass}")"
+    links+=("socks://${s5_cred}@${node_host}:${s5_port}#${n_s5}")
+    printf '%s\n%s\n' \
+      "socks5://${s5_user}:${s5_pass}@${node_host}:${s5_port}#${n_s5}" \
+      "tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}" > "$TG_S5_FILE"
     chmod 600 "$TG_S5_FILE" 2>/dev/null || true
     clash_names+=("\"${n_s5}\"")
     clash_proxies+=("  - name: \"${n_s5}\"
@@ -3090,12 +3253,16 @@ do_install() {
       n|N) in_disable_argo="true" ;;
       *)
         in_disable_argo="false"
-        read -p "Argo 固定域名 [留空使用临时隧道]: " in_argo_domain
-        in_argo_domain="$(printf '%s' "$in_argo_domain" | tr -d '[:space:]')"
+        read -r -e -p "Argo 固定域名 [留空使用临时隧道]: " in_argo_domain
+        in_argo_domain="$(normalize_host "$in_argo_domain")"
         if [ -n "$in_argo_domain" ]; then
-          read -s -p "Argo Tunnel Token: " in_argo_auth
-          echo ""
-          in_argo_auth="$(printf '%s' "$in_argo_auth" | tr -d '[:space:]')"
+          read_token "Argo Tunnel Token (输入可见，可直接粘贴): " in_argo_auth
+          if [ -z "$in_argo_auth" ]; then
+            warn "未输入 Token，将改用临时隧道"
+            in_argo_domain=""
+          else
+            warn_if_odd_argo_token "$in_argo_auth"
+          fi
         fi
         read -p "Cloudflare 优选域名/IP [默认 www.visa.com.tw]: " in_pref_host
         in_pref_host="${in_pref_host:-www.visa.com.tw}"
@@ -3309,7 +3476,7 @@ show_sub() {
         echo -e "${GREEN}=== 明文节点链接 ===${RESET}\n"
         [ -f "$SUB_RAW_FILE" ] && cat "$SUB_RAW_FILE"
         if [ -f "$TG_S5_FILE" ]; then
-          echo -e "\n${CYAN}=== Telegram 专属一键代理链接 ===${RESET}"
+          echo -e "\n${CYAN}=== SOCKS5 其他格式链接 (标准 socks5:// / Telegram) ===${RESET}"
           cat "$TG_S5_FILE"
         fi
         press_any_key
@@ -3554,21 +3721,20 @@ menu_config() {
             ;;
           2)
             local in_ad in_at
-            read -p "Argo 域名 [回车取消]: " in_ad
-            in_ad="$(printf '%s' "$in_ad" | tr -d '[:space:]')"
+            read -r -e -p "Argo 域名 [回车取消]: " in_ad
+            in_ad="$(normalize_host "$in_ad")"
             if [ -z "$in_ad" ]; then
               log "已取消修改"
               sleep 0.5
               continue
             fi
-            read -r -p "Argo Token [回车取消]: " in_at
-            echo ""
-            in_at="$(printf '%s' "$in_at" | tr -d '[:space:]')"
+            read_token "Argo Token (输入可见，可直接粘贴) [回车取消]: " in_at
             if [ -z "$in_at" ]; then
               log "已取消修改"
               sleep 0.5
               continue
             fi
+            warn_if_odd_argo_token "$in_at"
             set_val DISABLE_ARGO "false"
             set_val ARGO_DOMAIN "$in_ad"
             set_val ARGO_AUTH "$in_at"
@@ -3615,9 +3781,12 @@ menu_config() {
           log "Komari 探针已关闭"
           sleep 0.5
         elif [ -n "$in_kd" ]; then
-          read -r -p "Komari Token: " in_kt
-          echo ""
-          in_kt="$(printf '%s' "$in_kt" | tr -d '[:space:]')"
+          read_token "Komari Token (输入可见，可直接粘贴) [回车取消]: " in_kt
+          if [ -z "$in_kt" ]; then
+            log "已取消修改"
+            sleep 0.5
+            continue
+          fi
           set_val KOMARI_DOMAIN "$in_kd"
           set_val KOMARI_TOKEN "$in_kt"
           config_modified=1
