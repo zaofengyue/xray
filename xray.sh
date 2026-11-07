@@ -1916,11 +1916,6 @@ EOF
 
   # 1. Argo 穿透入站组
   if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
-    local argo_dom_val argo_auth_val is_fixed_argo=false
-    argo_dom_val="$(get_val ARGO_DOMAIN)"
-    argo_auth_val="$(get_val ARGO_AUTH)"
-    [ -n "$argo_dom_val" ] && [ "$argo_dom_val" != "your-domain.com" ] && [ -n "$argo_auth_val" ] && is_fixed_argo=true
-
     local argo_fallbacks='          {
             "path": "/vmess-ws",
             "dest": 10000,
@@ -1935,15 +1930,11 @@ EOF
             "path": "/trojan-ws",
             "dest": 10002,
             "xver": 0
-          }'
-    if $is_fixed_argo; then
-      argo_fallbacks+=',
+          },
           {
-            "path": "/vless-xhttp",
             "dest": 10003,
             "xver": 0
           }'
-    fi
 
     append_inbound '    {
       "tag": "argo-dispatcher-in",
@@ -2005,21 +1996,19 @@ EOF
         "routeOnly": true
       }
     }'
-    if $is_fixed_argo; then
-      append_inbound '    {
-        "tag": "vless-xhttp-in",
-        "port": 10003,
-        "listen": "127.0.0.1",
-        "protocol": "vless",
-        "settings": { "clients": [{ "id": "'"$uuid"'" }], "decryption": "none" },
-        "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/vless-xhttp", "mode": "auto" } },
-        "sniffing": {
-          "enabled": true,
-          "destOverride": ["http", "tls", "quic"],
-          "routeOnly": true
-        }
-      }'
-    fi
+    append_inbound '    {
+      "tag": "vless-xhttp-in",
+      "port": 10003,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": { "clients": [{ "id": "'"$uuid"'" }], "decryption": "none" },
+      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/vless-xhttp", "mode": "auto" } },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      }
+    }'
   fi
 
   # 2. 直连 Reality 入站 (TCP Vision)
@@ -2356,17 +2345,11 @@ generate_sub() {
 
   # 1. Argo 穿透链路 (仅当域名有效且非占位符时下发)
   if [ "$(get_val DISABLE_ARGO)" != "true" ] && [ -n "$argo_domain" ] && [ "$argo_domain" != "your-domain.com" ]; then
-    local argo_dom_val argo_auth_val is_fixed_argo=false
-    argo_dom_val="$argo_domain"
-    argo_auth_val="$(get_val ARGO_AUTH)"
-    [ -n "$argo_auth_val" ] && is_fixed_argo=true
-
-    # 仅固定隧道且域名验证通过时启用 Argo VLESS-xhttp
-    if $is_fixed_argo; then
-      local n_argo_xh="${name}-Argo-xhttp"
-      links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=auto&sni=${argo_domain}#${n_argo_xh}")
-      clash_names+=("\"${n_argo_xh}\"")
-      clash_proxies+=("  - name: \"${n_argo_xh}\"
+    # Argo VLESS-xhttp
+    local n_argo_xh="${name}-Argo-xhttp"
+    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=packet-up&sni=${argo_domain}#${n_argo_xh}")
+    clash_names+=("\"${n_argo_xh}\"")
+    clash_proxies+=("  - name: \"${n_argo_xh}\"
     type: vless
     server: ${prefer_host}
     port: 443
@@ -2377,10 +2360,8 @@ generate_sub() {
     servername: ${argo_domain}
     xhttp-opts:
       path: /vless-xhttp
-      mode: auto
-      headers:
-        Host: ${argo_domain}")
-    fi
+      host: ${argo_domain}
+      mode: packet-up")
 
     # VLESS-WS
     local n_argo_vless="${name}-Argo-VLESS"
