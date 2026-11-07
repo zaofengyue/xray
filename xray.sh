@@ -158,14 +158,6 @@ normalize_host() {
   printf '%s' "$h"
 }
 
-# Argo Tunnel Token 为 base64 编码的 JSON，通常以 eyJ 开头；格式明显不符时给出提示（不强制拒绝）
-warn_if_odd_argo_token() {
-  local t="$1"
-  if [ -n "$t" ] && { [ "${#t}" -lt 60 ] || [[ "$t" != eyJ* ]]; }; then
-    warn "该 Token 看起来不像 Cloudflare Tunnel Token（通常以 eyJ 开头、长度 100+），请确认复制完整"
-  fi
-}
-
 load_env() {
   [ -f "$ENV_FILE" ] || return 0
   local k v
@@ -1585,98 +1577,13 @@ outbound_rollback() {
 }
 outbound_commit() { rm -f "$OUTBOUND_FILE.bak" 2>/dev/null || true; }
 
-# 用一个临时 Xray 实例 + 本地 SOCKS 入站，强制流量走指定出口，真实检测该出口是否可用。
-# 不影响正在运行的服务；检测地址可用环境变量 OUTBOUND_VERIFY_URL 覆盖。
-verify_outbound_effect() {
-  local tag="$1" url="${OUTBOUND_VERIFY_URL:-https://www.cloudflare.com/cdn-cgi/trace}"
-  [ -x "$XRAY_BIN" ] && [ -f "$CONFIG_FILE" ] || return 0
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "缺少 curl，跳过出口生效检测"
-    return 0
-  fi
-  local ob work vport vpid i body="" ip warp loc rc=0
-  ob="$(awk '/^  "outbounds": \[/{f=1} f{print} f&&/^  \],?$/{exit}' "$CONFIG_FILE")"
-  [ -n "$ob" ] || return 0
-  work="$(mktemp -d "$APP_DIR/.vf.XXXXXX" 2>/dev/null)" || return 0
-  chmod 700 "$work"
-  vport="$(get_random_high_port)"
-  {
-    echo '{ "log": { "loglevel": "warning" },'
-    echo '  "inbounds": [{ "tag": "verify-in", "listen": "127.0.0.1", "port": '"$vport"', "protocol": "socks", "settings": { "auth": "noauth", "udp": false } }],'
-    printf '%s\n' "$ob" | sed '$ s/,[[:space:]]*$//'
-    echo '  ,"routing": { "rules": [{ "type": "field", "inboundTag": ["verify-in"], "outboundTag": "'"$tag"'" }] }'
-    echo '}'
-  } > "$work/v.json"
-
-  log "正在检测出口是否真正生效（经 ${tag} 访问 ${url##*//}，最长约 25 秒）..."
-  XRAY_LOCATION_ASSET="$BIN_DIR" "$XRAY_BIN" run -config "$work/v.json" > "$work/x.log" 2>&1 &
-  vpid=$!
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    (exec 3<>"/dev/tcp/127.0.0.1/$vport") 2>/dev/null && break
-    kill -0 "$vpid" 2>/dev/null || break
-    sleep 0.3
-  done
-  body="$(curl -s --max-time 20 --socks5-hostname "127.0.0.1:$vport" "$url" 2>/dev/null || true)"
-  kill "$vpid" 2>/dev/null || true
-  wait "$vpid" 2>/dev/null || true
-
-  ip="$(printf '%s\n' "$body" | sed -n 's/^ip=//p' | head -1)"
-  warp="$(printf '%s\n' "$body" | sed -n 's/^warp=//p' | head -1)"
-  loc="$(printf '%s\n' "$body" | sed -n 's/^loc=//p' | head -1)"
-  if [ "$tag" = "warp-out" ]; then
-    if [ "$warp" = "on" ] || [ "$warp" = "plus" ]; then
-      log "WARP 出口已生效 ✓  出口 IP: ${ip:-未知} (${loc:-?})  warp=${warp}"
-    elif [ -n "$body" ]; then
-      warn "出口已连通，但 Cloudflare 未识别为 WARP（warp=${warp:-未知}，出口 IP ${ip:-未知}）。多为凭据/RESERVED 不正确，建议在 WARP 菜单选择「重新注册新账号」"
-      rc=1
-    else
-      warn "WARP 出口不通：经 WARP 无法访问 Cloudflare。常见原因：VPS 封锁了到 engage.cloudflareclient.com:2408 的 UDP 出站、DNS 无法解析该域名，或凭据失效（可尝试重新注册）"
-      rc=1
-      [ -s "$work/x.log" ] && warn "Xray 日志: $(grep -v '\[Info\]\|\[Warning\]' "$work/x.log" | tail -2 | tr '\n' ' ')"
-    fi
-  else
-    if [ -n "$ip" ]; then
-      log "出口已生效 ✓  经该出口访问的出口 IP: ${ip} (${loc:-?})"
-    elif [ -n "$body" ]; then
-      log "出口可连通（已收到响应）"
-    else
-      warn "出口检测失败：经该出口无法访问外网，请检查出口地址/端口/账号密码是否正确"
-      rc=1
-      [ -s "$work/x.log" ] && warn "Xray 日志: $(grep -v '\[Info\]\|\[Warning\]' "$work/x.log" | tail -2 | tr '\n' ' ')"
-    fi
-  fi
-  rm -rf "$work"
-  return "$rc"
-}
-
-# 应用出口配置：先在前台生成并校验，失败则回滚并显示 Xray 报错；成功后重启并做真实生效检测。
-# 参数: 出口标签（warp-out、turn-out 或 proxy-out）
 apply_outbound_change() {
-  local tag="$1"
   if ! generate_config; then
     outbound_rollback
-    warn "出口配置未能通过 Xray 校验，已回滚到修改前的设置（当前运行中的配置未受影响）"
     return 1
   fi
-  do_restart
-  sleep 1
-  if ! verify_outbound_effect "$tag"; then
-    local ans=""
-    read -r -p "出口检测未通过：继续使用会导致对应流量无法访问。是否回滚到修改前的设置？[Y/n]: " ans
-    if [ "${ans:-Y}" != "n" ] && [ "${ans:-Y}" != "N" ]; then
-      outbound_rollback
-      generate_config >/dev/null 2>&1 || true
-      do_restart
-      warn "已回滚到修改前的出口设置"
-      return 1
-    fi
-  fi
   outbound_commit
-  local m
-  m="$(grep '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
-  if [ "$m" = "split" ]; then
-    echo -e "${YELLOW}提示: 当前为【智能分流】，仅 OpenAI/Gemini/Netflix/Disney/Spotify/HBO 走该出口，其他网站仍显示本机 IP。需要全部流量走出口请切换为【全局代理】。${RESET}"
-  fi
+  do_restart
   return 0
 }
 
@@ -1785,8 +1692,8 @@ TYPE=warp
 ROUTE_MODE=${r_mode}
 EOF
   chmod 600 "$OUTBOUND_FILE"
-  log "WARP 出口配置已就绪，正在校验并重启 Xray 服务..."
-  apply_outbound_change warp-out
+  log "WARP 出口配置已就绪，正在重启 Xray 服务生效..."
+  apply_outbound_change && { stop_turn2socks 2>/dev/null || true; }
   press_any_key
 }
 
@@ -1853,9 +1760,11 @@ menu_outbound() {
         return
       fi
       read -p "用户名 (留空无认证): " p_user
+      p_user="${p_user//$'\r'/}"
       if [ -n "$p_user" ]; then
         read -s -p "密码: " p_pass
         echo ""
+        p_pass="${p_pass//$'\r'/}"
       fi
       local r_m
       r_m="$(prompt_route_mode)"
@@ -1869,8 +1778,8 @@ PASS=${p_pass}
 ROUTE_MODE=${r_m}
 EOF
       chmod 600 "$OUTBOUND_FILE"
-      log "${proto^^} 出口配置已保存，正在校验并重启服务..."
-      apply_outbound_change proxy-out && { stop_turn2socks 2>/dev/null || true; }
+      log "${proto^^} 出口配置已保存，正在重启服务生效..."
+      apply_outbound_change && { stop_turn2socks 2>/dev/null || true; }
       press_any_key
       ;;
     3)
@@ -1890,9 +1799,11 @@ EOF
         return
       fi
       read -p "用户名 (留空无认证): " t_user
+      t_user="${t_user//$'\r'/}"
       if [ -n "$t_user" ]; then
         read -s -p "密码: " t_pass
         echo ""
+        t_pass="${t_pass//$'\r'/}"
       fi
       t_lport="$(prompt_relay_port "本地 SOCKS5 转接端口 [默认 10808]: " "10808")"
       if [ -n "$t_host" ]; then
@@ -1909,10 +1820,17 @@ LOCAL_PORT=${t_lport}
 ROUTE_MODE=${r_m}
 EOF
         chmod 600 "$OUTBOUND_FILE"
-        stop_turn2socks 2>/dev/null || true
-        log "TURN 出口配置已保存，正在启动 turn2socks 并校验、重启服务..."
-        start_turn2socks
-        apply_outbound_change turn-out || stop_turn2socks 2>/dev/null || true
+        log "TURN 出口配置已保存，正在启动 turn2socks 并重启服务..."
+        if ! generate_config; then
+          outbound_rollback
+        elif ! start_turn2socks; then
+          outbound_rollback
+          generate_config >/dev/null 2>&1 || true
+          [ "$cur_type" = "turn" ] && { start_turn2socks 2>/dev/null || true; }
+        else
+          outbound_commit
+          do_restart
+        fi
         press_any_key
       fi
       ;;
@@ -1923,11 +1841,8 @@ EOF
       if [ ! -f "$OUTBOUND_FILE" ]; then
         warn "当前未设置任何外置出口，无法切换分流模式"
       else
-        local new_mode cur_t_tag="proxy-out" cur_type
+        local new_mode
         new_mode="$(prompt_route_mode)"
-        cur_type="$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
-        [ "$cur_type" = "warp" ] && cur_t_tag="warp-out"
-        [ "$cur_type" = "turn" ] && cur_t_tag="turn-out"
         outbound_backup
         if grep -q '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null; then
           sed -i "s/^ROUTE_MODE=.*/ROUTE_MODE=${new_mode}/" "$OUTBOUND_FILE"
@@ -1936,8 +1851,8 @@ EOF
         fi
         local m_desc="智能分流"
         [ "$new_mode" = "global" ] && m_desc="全局代理"
-        log "分流模式已切换为: ${m_desc}，正在校验并重启服务..."
-        apply_outbound_change "$cur_t_tag"
+        log "分流模式已切换为: ${m_desc}，正在重启服务生效..."
+        apply_outbound_change
       fi
       press_any_key
       ;;
@@ -2613,14 +2528,10 @@ generate_sub() {
     s_host="${s_host%]}"
     local n_s5="${name}-Socks5"
     # 订阅内使用 v2rayN/v2rayNG/Shadowrocket 通用的 socks://base64(user:pass)@host:port 格式
-    # (v2rayN 自己的导出格式与此一致，采用标准 Base64 凭据；旧版本不识别 socks5:// 前缀，直接导入会失败)。
-    # 标准 socks5:// 与 Telegram 链接另存，供其他客户端使用。
     local s5_cred
     s5_cred="$(b64 "${s5_user}:${s5_pass}")"
     links+=("socks://${s5_cred}@${node_host}:${s5_port}#${n_s5}")
-    printf '%s\n%s\n' \
-      "socks5://${s5_user}:${s5_pass}@${node_host}:${s5_port}#${n_s5}" \
-      "tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}" > "$TG_S5_FILE"
+    echo "tg://socks?server=${s_host}&port=${s5_port}&user=${s5_user}&pass=${s5_pass}" > "$TG_S5_FILE"
     chmod 600 "$TG_S5_FILE" 2>/dev/null || true
     clash_names+=("\"${n_s5}\"")
     clash_proxies+=("  - name: \"${n_s5}\"
@@ -2902,7 +2813,7 @@ do_run() {
 
     # 守护 turn2socks
     if [ -f "$OUTBOUND_FILE" ] && [ "$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)" = "turn" ]; then
-      if [ -f "$TURN2SOCKS_PID" ] && ! kill -0 "$(cat "$TURN2SOCKS_PID" 2>/dev/null)" 2>/dev/null; then
+      if [ ! -f "$TURN2SOCKS_PID" ] || ! kill -0 "$(cat "$TURN2SOCKS_PID" 2>/dev/null)" 2>/dev/null; then
         warn "检测到 turn2socks 转接异常退出，正在自动拉起守护..."
         start_turn2socks || true
       fi
@@ -3253,12 +3164,9 @@ do_install() {
         read -r -e -p "Argo 固定域名 [留空使用临时隧道]: " in_argo_domain
         in_argo_domain="$(normalize_host "$in_argo_domain")"
         if [ -n "$in_argo_domain" ]; then
-          read_token "Argo Tunnel Token (输入可见，可直接粘贴): " in_argo_auth
+          read_token "Argo Tunnel Token: " in_argo_auth
           if [ -z "$in_argo_auth" ]; then
-            warn "未输入 Token，将改用临时隧道"
             in_argo_domain=""
-          else
-            warn_if_odd_argo_token "$in_argo_auth"
           fi
         fi
         read -p "Cloudflare 优选域名/IP [默认 www.visa.com.tw]: " in_pref_host
@@ -3473,7 +3381,7 @@ show_sub() {
         echo -e "${GREEN}=== 明文节点链接 ===${RESET}\n"
         [ -f "$SUB_RAW_FILE" ] && cat "$SUB_RAW_FILE"
         if [ -f "$TG_S5_FILE" ]; then
-          echo -e "\n${CYAN}=== SOCKS5 其他格式链接 (标准 socks5:// / Telegram) ===${RESET}"
+          echo -e "\n${CYAN}=== Telegram 专属一键代理链接 ===${RESET}"
           cat "$TG_S5_FILE"
         fi
         press_any_key
@@ -3725,13 +3633,12 @@ menu_config() {
               sleep 0.5
               continue
             fi
-            read_token "Argo Token (输入可见，可直接粘贴) [回车取消]: " in_at
+            read_token "Argo Token [回车取消]: " in_at
             if [ -z "$in_at" ]; then
               log "已取消修改"
               sleep 0.5
               continue
             fi
-            warn_if_odd_argo_token "$in_at"
             set_val DISABLE_ARGO "false"
             set_val ARGO_DOMAIN "$in_ad"
             set_val ARGO_AUTH "$in_at"
@@ -3778,7 +3685,7 @@ menu_config() {
           log "Komari 探针已关闭"
           sleep 0.5
         elif [ -n "$in_kd" ]; then
-          read_token "Komari Token (输入可见，可直接粘贴) [回车取消]: " in_kt
+          read_token "Komari Token: " in_kt
           if [ -z "$in_kt" ]; then
             log "已取消修改"
             sleep 0.5
