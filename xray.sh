@@ -1212,6 +1212,17 @@ b64_urlsafe() {
   printf '%s' "$1" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '='
 }
 
+url_encode() {
+  local LC_ALL=C s="$1" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) printf '%s' "$c" ;;
+      *) printf '%%%02X' "'$c" ;;
+    esac
+  done
+}
+
 press_any_key() {
   echo ""
   read -n 1 -s -r -p "按任意键继续..."
@@ -1914,8 +1925,17 @@ EOF
     first_inbound=0
   }
 
+  # 是否启用本地 10003 vless-xhttp-in 会话中心 (支持 Argo-xhttp、Reality-xhttp 以及上下行分离 Session 共享)
+  local has_xhttp_hub=false xh_fb_snippet=""
+  if [ "$(get_val DISABLE_ARGO)" != "true" ] || [ -n "$xhttp_port" ]; then
+    has_xhttp_hub=true
+    xh_fb_snippet=', "fallbacks": [{ "dest": 10003, "xver": 0 }]'
+  fi
+
   # 1. Argo 穿透入站组
   if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
+    local argo_listen="127.0.0.1"
+    [ "$(get_val XHTTP_DOWN_MODE)" = "cdn" ] && argo_listen="$listen_addr"
     local argo_fallbacks='          {
             "path": "/vmess-ws",
             "dest": 10000,
@@ -1939,7 +1959,7 @@ EOF
     append_inbound '    {
       "tag": "argo-dispatcher-in",
       "port": 8001,
-      "listen": "127.0.0.1",
+      "listen": "'"$argo_listen"'",
       "protocol": "vless",
       "settings": {
         "clients": [{ "id": "'"$uuid"'", "level": 0 }],
@@ -1996,6 +2016,9 @@ EOF
         "routeOnly": true
       }
     }'
+  fi
+
+  if [ "$has_xhttp_hub" = "true" ]; then
     append_inbound '    {
       "tag": "vless-xhttp-in",
       "port": 10003,
@@ -2020,7 +2043,7 @@ EOF
       "protocol": "vless",
       "settings": {
         "clients": [{ "id": "'"$uuid"'", "flow": "xtls-rprx-vision" }],
-        "decryption": "none"
+        "decryption": "none"'"$xh_fb_snippet"'
       },
       "streamSettings": {
         "network": "tcp",
@@ -2038,7 +2061,7 @@ EOF
     }'
   fi
 
-  # 3. 直连 Reality xhttp 入站
+  # 3. 直连 Reality xhttp 入站 (TCP + Fallback 10003，同时支持直连 Reality-xhttp 与 Argo-xhttp 下行复用)
   if [ -n "$xhttp_port" ] && [ -n "$reality_priv" ]; then
     append_inbound '    {
       "tag": "reality-xhttp-in",
@@ -2047,10 +2070,11 @@ EOF
       "protocol": "vless",
       "settings": {
         "clients": [{ "id": "'"$uuid"'", "flow": "" }],
-        "decryption": "none"
+        "decryption": "none",
+        "fallbacks": [{ "dest": 10003, "xver": 0 }]
       },
       "streamSettings": {
-        "network": "xhttp",
+        "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "show": false,
@@ -2059,10 +2083,6 @@ EOF
           "serverNames": ["'"$reality_domain"'"],
           "privateKey": "'"$reality_priv"'",
           "shortIds": ["'"$reality_sid"'"]
-        },
-        "xhttpSettings": {
-          "path": "/xhttp",
-          "mode": "auto"
         }
       },
       "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
@@ -2124,7 +2144,7 @@ EOF
       "port": '"$trojan_port"',
       "listen": "'"$listen_addr"'",
       "protocol": "trojan",
-      "settings": { "clients": [{ "password": "'"$trojan_pass"'" }] },
+      "settings": { "clients": [{ "password": "'"$trojan_pass"'" }]'"$xh_fb_snippet"' },
       "streamSettings": { "network": "tcp", '"$cert_snippet"' },
       "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
     }'
@@ -2339,15 +2359,47 @@ generate_sub() {
   node_host="$(get_val SERVER_DOMAIN)"
   [ -z "$node_host" ] && node_host="$(format_addr "$pub_ip")"
 
+  local reality_port xhttp_port reality_domain reality_pub
+  reality_port="$(get_val REALITY_PORT)"
+  xhttp_port="$(get_val XHTTP_PORT)"
+  reality_domain="$(get_val REALITY_DOMAIN)"
+  [ -z "$reality_domain" ] && reality_domain="www.iij.ad.jp"
+  read -r _ reality_pub <<< "$(get_reality_keys)"
+
   local links=()
   local clash_proxies=()
   local clash_names=()
 
   # 1. Argo 穿透链路 (仅当域名有效且非占位符时下发)
   if [ "$(get_val DISABLE_ARGO)" != "true" ] && [ -n "$argo_domain" ] && [ "$argo_domain" != "your-domain.com" ]; then
-    # Argo VLESS-xhttp
+    # Argo VLESS-xhttp (支持同源或上下行分离 downloadSettings)
     local n_argo_xh="${name}-Argo-xhttp"
-    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=packet-up&sni=${argo_domain}#${n_argo_xh}")
+    local xh_extra_param=""
+    local down_mode down_domain down_host
+    down_mode="$(get_val XHTTP_DOWN_MODE)"
+    down_domain="$(get_val XHTTP_DOWN_DOMAIN)"
+    down_host="$(get_val XHTTP_DOWN_HOST)"
+
+    if [ "$down_mode" = "reality" ]; then
+      local dl_r_port="$xhttp_port"
+      [ -z "$dl_r_port" ] && dl_r_port="$reality_port"
+      if [ -n "$dl_r_port" ] && [ -n "$reality_pub" ] && [ -n "$node_host" ]; then
+        local rx_addr="${node_host#[}"
+        rx_addr="${rx_addr%]}"
+        local extra_json extra_enc
+        extra_json="$(printf '{"xmux":{"maxConcurrency":"16-32","maxConnections":0,"cMaxReuseTimes":0,"hMaxRequestTimes":"600-900","hMaxReusableSecs":"1800-3000"},"downloadSettings":{"address":"%s","port":%s,"network":"xhttp","security":"reality","realitySettings":{"serverName":"%s","fingerprint":"chrome","show":false,"publicKey":"%s","shortId":"%s","spiderX":""},"xhttpSettings":{"path":"/vless-xhttp","mode":"auto"}}}' "$rx_addr" "$dl_r_port" "$reality_domain" "$reality_pub" "$reality_sid")"
+        extra_enc="$(url_encode "$extra_json")"
+        xh_extra_param="&extra=${extra_enc}"
+      fi
+    elif [ "$down_mode" = "cdn" ] && [ -n "$down_domain" ]; then
+      [ -z "$down_host" ] && down_host="$down_domain"
+      local extra_json extra_enc
+      extra_json="$(printf '{"xmux":{"maxConcurrency":"16-32","maxConnections":0,"cMaxReuseTimes":0,"hMaxRequestTimes":"600-900","hMaxReusableSecs":"1800-3000"},"downloadSettings":{"address":"%s","port":443,"network":"xhttp","security":"tls","tlsSettings":{"serverName":"%s","alpn":["h2","http/1.1"],"fingerprint":"chrome"},"xhttpSettings":{"path":"/vless-xhttp","host":"%s","mode":"auto"}}}' "$down_host" "$down_domain" "$down_domain")"
+      extra_enc="$(url_encode "$extra_json")"
+      xh_extra_param="&extra=${extra_enc}"
+    fi
+
+    links+=("vless://${uuid}@${prefer_host}:443?encryption=none&security=tls&type=xhttp&host=${argo_domain}&path=%2Fvless-xhttp&mode=packet-up&sni=${argo_domain}${xh_extra_param}#${n_argo_xh}")
     clash_names+=("\"${n_argo_xh}\"")
     clash_proxies+=("  - name: \"${n_argo_xh}\"
     type: vless
@@ -2423,12 +2475,6 @@ generate_sub() {
   fi
 
   # 2. 直连 VLESS-Reality (TCP Vision)
-  local reality_port reality_domain
-  reality_port="$(get_val REALITY_PORT)"
-  reality_domain="$(get_val REALITY_DOMAIN)"
-  [ -z "$reality_domain" ] && reality_domain="www.iij.ad.jp"
-  read -r _ reality_pub <<< "$(get_reality_keys)"
-
   if [ -n "$reality_port" ] && [ -n "$reality_pub" ] && [ -n "$node_host" ]; then
     local r_host="${node_host#[}"
     r_host="${r_host%]}"
@@ -2452,13 +2498,11 @@ generate_sub() {
   fi
 
   # 3. 直连 VLESS-Reality (xhttp)
-  local xhttp_port
-  xhttp_port="$(get_val XHTTP_PORT)"
   if [ -n "$xhttp_port" ] && [ -n "$reality_pub" ] && [ -n "$node_host" ]; then
     local rx_host="${node_host#[}"
     rx_host="${rx_host%]}"
     local n_r_xh="${name}-Reality-xhttp"
-    links+=("vless://${uuid}@${node_host}:${xhttp_port}?encryption=none&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&sid=${reality_sid}&type=xhttp&path=%2Fxhttp&mode=auto#${n_r_xh}")
+    links+=("vless://${uuid}@${node_host}:${xhttp_port}?encryption=none&security=reality&sni=${reality_domain}&fp=chrome&pbk=${reality_pub}&sid=${reality_sid}&type=xhttp&path=%2Fvless-xhttp&mode=auto#${n_r_xh}")
     clash_names+=("\"${n_r_xh}\"")
     clash_proxies+=("  - name: \"${n_r_xh}\"
     type: vless
@@ -2471,7 +2515,7 @@ generate_sub() {
     flow: \"\"
     servername: ${reality_domain}
     xhttp-opts:
-      path: /xhttp
+      path: /vless-xhttp
       mode: auto
     reality-opts:
       public-key: ${reality_pub}
@@ -3426,6 +3470,17 @@ menu_config() {
     cur_km="$(get_val KOMARI_DOMAIN "未配置")"
     cur_srv="$(get_val SERVER_DOMAIN "自动探测")"
 
+    local cur_down_mode cur_down_dom cur_pref_disp
+    cur_down_mode="$(get_val XHTTP_DOWN_MODE)"
+    cur_down_dom="$(get_val XHTTP_DOWN_DOMAIN)"
+    if [ "$cur_down_mode" = "reality" ]; then
+      cur_pref_disp="${cur_pref} [xhttp下行: Reality]"
+    elif [ "$cur_down_mode" = "cdn" ] && [ -n "$cur_down_dom" ]; then
+      cur_pref_disp="${cur_pref} [xhttp下行: ${cur_down_dom}]"
+    else
+      cur_pref_disp="${cur_pref}"
+    fi
+
     local reality_display
     if [ "$cur_rp" != "未启用" ] && [ "$cur_xp" != "未启用" ]; then
       reality_display="TCP:${cur_rp} | xhttp:${cur_xp} | Reality 域名: ${cur_rd}"
@@ -3444,7 +3499,7 @@ menu_config() {
     echo -e "${WHITE} 4. SOCKS5 端口   : ${CYAN}${cur_s5}${RESET}"
     echo -e "${WHITE} 5. Trojan 端口   : ${CYAN}${cur_tp}${RESET}"
     echo -e "${WHITE} 6. Argo 隧道     : ${CYAN}${cur_argo}${RESET}"
-    echo -e "${WHITE} 7. CDN 优选      : ${CYAN}${cur_pref}${RESET}"
+    echo -e "${WHITE} 7. CDN 优选      : ${CYAN}${cur_pref_disp}${RESET}"
     echo -e "${WHITE} 8. Komari 探针   : ${CYAN}${cur_km}${RESET}"
     echo -e "${WHITE} 9. 连接地址      : ${CYAN}${cur_srv}${RESET}"
     echo -e "${WHITE} 0. 返回面板${RESET}"
@@ -3653,8 +3708,62 @@ menu_config() {
           set_val CF_PREFER_HOST "$in_pref"
           config_modified=1
           log "CDN 优选地址已更新"
-          sleep 0.5
         fi
+
+        echo -e "\n${GREEN}--- xhttp 上下行分离设置 (进阶功能) ---${RESET}"
+        echo -e "说明: xhttp 允许上行与下行走不同线路。当前默认同源走 Cloudflare CDN。"
+        echo -e "${WHITE} 1. 默认同源 (上下行均走 Cloudflare CDN)${RESET}"
+        echo -e "${WHITE} 2. 下行复用本机 Reality-xhttp (推荐: 规避上行阻断且下行直连高速)${RESET}"
+        echo -e "${WHITE} 3. 下行自定义 CDN (如 AWS CloudFront 等)${RESET}"
+        echo -e "${WHITE} 0. 保持不变${RESET}"
+        read -p "请选择下行策略 [0-3, 默认 0]: " xh_down_opt
+        case "$xh_down_opt" in
+          1)
+            if [ -n "$cur_down_mode" ]; then
+              [ "$cur_down_mode" = "cdn" ] && close_firewall_port 8001 tcp
+              set_val XHTTP_DOWN_MODE ""
+              set_val XHTTP_DOWN_DOMAIN ""
+              set_val XHTTP_DOWN_HOST ""
+              config_modified=1
+              log "已恢复 xhttp 默认同源模式"
+            fi
+            ;;
+          2)
+            if [ "$cur_xp" = "未启用" ] && [ "$cur_rp" = "未启用" ]; then
+              warn "本机未开启 Reality 服务，无法复用 Reality 作为下行！"
+            else
+              [ "$cur_down_mode" = "cdn" ] && close_firewall_port 8001 tcp
+              set_val XHTTP_DOWN_MODE "reality"
+              set_val XHTTP_DOWN_DOMAIN ""
+              set_val XHTTP_DOWN_HOST ""
+              config_modified=1
+              log "已启用 xhttp 下行复用本机 Reality"
+            fi
+            ;;
+          3)
+            read -p "请输入下行 CDN 域名 (如 d123.cloudfront.net): " in_down_dom
+            in_down_dom="$(printf '%s' "$in_down_dom" | tr -d '[:space:]')"
+            if [ -n "$in_down_dom" ]; then
+              if ! validate_domain_name "$in_down_dom"; then
+                warn "CDN 域名格式非法"
+              else
+                read -p "请输入下行 CDN 优选 IP/主机名 [回车默认使用域名]: " in_down_host
+                in_down_host="$(printf '%s' "$in_down_host" | tr -d '[:space:]')"
+                [ -z "$in_down_host" ] && in_down_host="$in_down_dom"
+                set_val XHTTP_DOWN_MODE "cdn"
+                set_val XHTTP_DOWN_DOMAIN "$in_down_dom"
+                set_val XHTTP_DOWN_HOST "$in_down_host"
+                open_firewall_port 8001 tcp
+                config_modified=1
+                log "已配置 xhttp 下行自定义 CDN: ${in_down_dom}"
+                echo -e "${YELLOW}提示: 请将 ${in_down_dom} 的回源地址指向本机公网 IP，回源协议 HTTP，回源端口 8001${RESET}"
+              fi
+            fi
+            ;;
+          0|*)
+            ;;
+        esac
+        sleep 0.5
         ;;
       8)
         read -p "Komari 域名 [当前 ${cur_km}，填 0 关闭]: " in_kd
@@ -3908,29 +4017,31 @@ do_uninstall() {
 }
 
 # ── 22. 命令行与快捷指令入口分发 ───────────────────────────────────────────────
-setup_shortcuts
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  setup_shortcuts
 
-case "${1:-}" in
-  run)      do_run ;;
-  stop)
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
-      systemctl stop "$SVC_NAME"
-      log "Xray 系统服务已通过 systemctl 停止"
-    else
-      do_stop
-    fi
-    ;;
-  restart)  do_restart ;;
-  sub)      show_sub ;;
-  log)      do_log ;;
-  install)  do_install ;;
-  update)   menu_update ;;
-  rollback) do_rollback ;;
-  del)      do_uninstall ;;
-  *)
-    if [ ! -x "$XRAY_BIN" ]; then
-      do_install
-    fi
-    do_menu
-    ;;
-esac
+  case "${1:-}" in
+    run)      do_run ;;
+    stop)
+      if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$SVC_NAME" >/dev/null 2>&1; then
+        systemctl stop "$SVC_NAME"
+        log "Xray 系统服务已通过 systemctl 停止"
+      else
+        do_stop
+      fi
+      ;;
+    restart)  do_restart ;;
+    sub)      show_sub ;;
+    log)      do_log ;;
+    install)  do_install ;;
+    update)   menu_update ;;
+    rollback) do_rollback ;;
+    del)      do_uninstall ;;
+    *)
+      if [ ! -x "$XRAY_BIN" ]; then
+        do_install
+      fi
+      do_menu
+      ;;
+  esac
+fi
