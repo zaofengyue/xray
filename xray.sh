@@ -136,11 +136,6 @@ escape_json() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# URL-Safe Base64 编码（无填充 =），用于订阅链接中的 user:pass 凭据
-b64_urlsafe() {
-  printf '%s' "$1" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '='
-}
-
 # 读取令牌/长字符串：回显可见、启用 readline（支持粘贴、方向键与退格编辑）；
 # 自动去掉 \r、首尾空白与引号；若粘贴了 Cloudflare 面板里的整条命令
 # (cloudflared ... install <token>)，只取最后一段。
@@ -1655,7 +1650,7 @@ verify_outbound_effect() {
 }
 
 # 应用出口配置：先在前台生成并校验，失败则回滚并显示 Xray 报错；成功后重启并做真实生效检测。
-# 参数: 出口标签（warp-out 或 proxy-out）
+# 参数: 出口标签（warp-out、turn-out 或 proxy-out）
 apply_outbound_change() {
   local tag="$1"
   if ! generate_config; then
@@ -1917,7 +1912,7 @@ EOF
         stop_turn2socks 2>/dev/null || true
         log "TURN 出口配置已保存，正在启动 turn2socks 并校验、重启服务..."
         start_turn2socks
-        apply_outbound_change proxy-out || stop_turn2socks 2>/dev/null || true
+        apply_outbound_change turn-out || stop_turn2socks 2>/dev/null || true
         press_any_key
       fi
       ;;
@@ -1928,9 +1923,11 @@ EOF
       if [ ! -f "$OUTBOUND_FILE" ]; then
         warn "当前未设置任何外置出口，无法切换分流模式"
       else
-        local new_mode cur_t_tag="proxy-out"
+        local new_mode cur_t_tag="proxy-out" cur_type
         new_mode="$(prompt_route_mode)"
-        [ "$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)" = "warp" ] && cur_t_tag="warp-out"
+        cur_type="$(grep '^TYPE=' "$OUTBOUND_FILE" 2>/dev/null | cut -d'=' -f2-)"
+        [ "$cur_type" = "warp" ] && cur_t_tag="warp-out"
+        [ "$cur_type" = "turn" ] && cur_t_tag="turn-out"
         outbound_backup
         if grep -q '^ROUTE_MODE=' "$OUTBOUND_FILE" 2>/dev/null; then
           sed -i "s/^ROUTE_MODE=.*/ROUTE_MODE=${new_mode}/" "$OUTBOUND_FILE"
@@ -2616,10 +2613,10 @@ generate_sub() {
     s_host="${s_host%]}"
     local n_s5="${name}-Socks5"
     # 订阅内使用 v2rayN/v2rayNG/Shadowrocket 通用的 socks://base64(user:pass)@host:port 格式
-    # (v2rayN 自己的导出格式与此一致；旧版本不识别 socks5:// 前缀，直接导入会失败)。
+    # (v2rayN 自己的导出格式与此一致，采用标准 Base64 凭据；旧版本不识别 socks5:// 前缀，直接导入会失败)。
     # 标准 socks5:// 与 Telegram 链接另存，供其他客户端使用。
     local s5_cred
-    s5_cred="$(b64_urlsafe "${s5_user}:${s5_pass}")"
+    s5_cred="$(b64 "${s5_user}:${s5_pass}")"
     links+=("socks://${s5_cred}@${node_host}:${s5_port}#${n_s5}")
     printf '%s\n%s\n' \
       "socks5://${s5_user}:${s5_pass}@${node_host}:${s5_port}#${n_s5}" \
