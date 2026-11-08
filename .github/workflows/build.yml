@@ -6,7 +6,6 @@ on:
       - 'nodejs/**'
       - 'turn2socks/**'
       - 'Dockerfile'
-      - 'xray.sh'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 

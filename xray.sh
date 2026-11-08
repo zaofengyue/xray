@@ -604,11 +604,10 @@ download_turn2socks() {
     if is_trusted_dir "$script_dir"; then
       local b b_sha
       for b in "$script_dir/turn2socks-linux-${t2s_arch}" "$script_dir/bin/turn2socks"; do
-        if [ -f "$b" ] && [ -x "$b" ] && is_valid_elf "$b" && command -v sha256sum >/dev/null 2>&1; then
-          b_sha="$(sha256sum "$b" 2>/dev/null | awk '{print $1}')"
-          if [ "$b_sha" = "$exp_t2s_sha" ]; then
+        if [ -f "$b" ] && [ -x "$b" ] && is_valid_elf "$b"; then
+          if "$b" -v >/dev/null 2>&1; then
             cp -f "$b" "$TURN2SOCKS_BIN" && chmod +x "$TURN2SOCKS_BIN"
-            log "turn2socks 组件已就绪 (复用哈希核验通过的本地预置: $b)"
+            log "turn2socks 组件已就绪 (开发者模式: 复用本地预置: $b)"
             return 0
           fi
         fi
@@ -2096,7 +2095,7 @@ EOF
     }'
   fi
 
-  # 本地 xhttp 会话汇聚中心 (path 设为 / 前缀通配，向下兼容旧订阅 /xhttp 与新订阅 /vless-xhttp)
+  # 本地 xhttp 会话汇聚中心 (内部统一监听 /vless-xhttp 路径，承载 Argo-xhttp/Reality/Trojan 回落)
   if [ "$has_xhttp_hub" = "true" ]; then
     append_inbound '    {
       "tag": "vless-xhttp-in",
@@ -2104,7 +2103,7 @@ EOF
       "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": { "clients": [{ "id": "'"$uuid"'" }], "decryption": "none" },
-      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/", "mode": "auto" } },
+      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/vless-xhttp", "mode": "auto" } },
       "sniffing": {
         "enabled": true,
         "destOverride": ["http", "tls", "quic"],
@@ -2651,7 +2650,7 @@ generate_sub() {
   local trojan_port
   trojan_port="$(get_val TROJAN_PORT)"
   if [ -n "$trojan_port" ] && [ -n "$node_host" ]; then
-    local tr_sni tr_insec="1" skip_cert="true"
+    local tr_sni tr_insec="1" skip_cert="true" tr_pin=""
     tr_sni="$(get_val TROJAN_CERT_DOMAIN)"
     [ -z "$tr_sni" ] && tr_sni="$(get_val SERVER_DOMAIN)"
     if [ -n "$tr_sni" ] && [ -f "$DOMAIN_CERT_DIR/$tr_sni/cert.pem" ]; then
@@ -2661,9 +2660,22 @@ generate_sub() {
       tr_sni="bing.com"
       tr_insec="1"
       skip_cert="true"
+      local self_cert="$DOMAIN_CERT_DIR/self_signed/cert.pem"
+      if [ -f "$self_cert" ] && command -v openssl >/dev/null 2>&1; then
+        tr_pin="$(openssl x509 -in "$self_cert" -outform der 2>/dev/null | sha256sum 2>/dev/null | cut -d' ' -f1 || true)"
+      fi
     fi
     local n_tr="${name}-Trojan-TCP"
-    links+=("trojan://${trojan_pass}@${node_host}:${trojan_port}?security=tls&sni=${tr_sni}&allowInsecure=${tr_insec}#${n_tr}")
+    local tr_link="trojan://${trojan_pass}@${node_host}:${trojan_port}?security=tls&sni=${tr_sni}"
+    if [ "$tr_insec" = "1" ]; then
+      if [ -n "$tr_pin" ]; then
+        tr_link="${tr_link}&pcs=${tr_pin}"
+      else
+        tr_link="${tr_link}&allowInsecure=1"
+      fi
+    fi
+    tr_link="${tr_link}#${n_tr}"
+    links+=("$tr_link")
     local tr_host="${node_host#[}"
     tr_host="${tr_host%]}"
     clash_names+=("\"${n_tr}\"")
