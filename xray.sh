@@ -101,14 +101,14 @@ chmod 700 "$APP_DIR" "$STATE_DIR" "$BIN_DIR" "$DOMAIN_CERT_DIR" 2>/dev/null || t
 export XRAY_LOCATION_ASSET="$BIN_DIR"
 
 # ── 4. 安全配置环境变量工具 ────────────────────────────────────────────────────
-get_val() {
-  local key="$1" def="${2:-}"
-  if [ ! -f "$ENV_FILE" ]; then
+get_val_from() {
+  local target_file="$1" key="$2" def="${3:-}"
+  if [ ! -f "$target_file" ]; then
     printf '%s' "$def"
     return 0
   fi
   local val
-  val="$(grep "^${key}=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d'=' -f2-)"
+  val="$(grep "^${key}=" "$target_file" 2>/dev/null | head -1 | cut -d'=' -f2-)"
   val="${val#\"}"
   val="${val%\"}"
   val="$(printf '%s' "$val" | tr -d '\r\n')"
@@ -118,6 +118,10 @@ get_val() {
   else
     printf '%s' "$def"
   fi
+}
+
+get_val() {
+  get_val_from "$ENV_FILE" "$@"
 }
 
 set_val() {
@@ -577,11 +581,11 @@ download_turn2socks() {
   case "$(uname -m)" in
     x86_64|amd64)
       t2s_arch="amd64"
-      exp_t2s_sha="bd6b9965485cac9598cb8fc1c2ab37fb15b8a3871f032994021a06d90e05ada3"
+      exp_t2s_sha="a880097b3ef60f1f32ad5850effee76e419a879e0769ec49ba20254bfceee94e"
       ;;
     aarch64|arm64)
       t2s_arch="arm64"
-      exp_t2s_sha="15f36e40303dce07b704dabf514e514b9d1e8d2269e89dd8ade46a2722bef4a0"
+      exp_t2s_sha="e1301b34d9b08bf932962febd20faa58bb7f9c63e04dbb296f394337927856c4"
       ;;
     *)
       warn "turn2socks 仅提供 amd64 / arm64 构建，当前架构 $(uname -m) 不受支持"
@@ -1027,6 +1031,58 @@ close_firewall_port() {
   [ "${_FW_RELOAD:-0}" = "1" ] && { firewall-cmd --reload >/dev/null 2>&1 || true; }
   persist_firewall_rules
   return 0
+}
+
+# 获取指定 env 文件中的所有服务端口列表，格式: "port/proto"
+get_env_ports() {
+  local target_env="${1:-$ENV_FILE}"
+  [ -f "$target_env" ] || return 0
+  local rp xp sp s5 tp cdn_m cdn_p
+  rp="$(get_val_from "$target_env" REALITY_PORT)"
+  xp="$(get_val_from "$target_env" XHTTP_PORT)"
+  sp="$(get_val_from "$target_env" SS_PORT)"
+  s5="$(get_val_from "$target_env" S5_PORT)"
+  tp="$(get_val_from "$target_env" TROJAN_PORT)"
+  cdn_m="$(get_val_from "$target_env" XHTTP_DOWN_MODE)"
+  cdn_p="$(get_val_from "$target_env" CDN_ORIGIN_PORT "8443")"
+
+  [ -n "$rp" ] && echo "$rp/tcp"
+  [ -n "$xp" ] && echo "$xp/tcp"
+  [ -n "$sp" ] && echo "$sp/both"
+  [ -n "$s5" ] && echo "$s5/both"
+  [ -n "$tp" ] && echo "$tp/tcp"
+  [ "$cdn_m" = "cdn" ] && [ -n "$cdn_p" ] && echo "$cdn_p/tcp"
+}
+
+# 比较旧 env 和新 env，差异化调整防火墙规则 (仅在配置确定保存并应用时调用)
+sync_firewall_changes() {
+  local old_env="$1" new_env="$2"
+  [ -f "$new_env" ] || return 0
+
+  local old_ports=() new_ports=()
+  if [ -n "$old_env" ] && [ -f "$old_env" ]; then
+    while IFS= read -r p; do
+      [ -n "$p" ] && old_ports+=("$p")
+    done < <(get_env_ports "$old_env")
+  fi
+
+  while IFS= read -r p; do
+    [ -n "$p" ] && new_ports+=("$p")
+  done < <(get_env_ports "$new_env")
+
+  for op in "${old_ports[@]}"; do
+    local still_exists=0
+    for np in "${new_ports[@]}"; do
+      [ "$op" = "$np" ] && { still_exists=1; break; }
+    done
+    if [ "$still_exists" = "0" ]; then
+      close_firewall_port "$op"
+    fi
+  done
+
+  for np in "${new_ports[@]}"; do
+    open_firewall_port "$np"
+  done
 }
 
 # 卸载时回收所有记录在案的规则 (包含 ACME 申请证书时放行的 80 端口)
@@ -1711,15 +1767,15 @@ EOF
 prompt_route_mode() {
   echo -e "${GRAY}------------------------------------------------------------${RESET}" >&2
   echo -e "分流模式:" >&2
-  echo -e "${WHITE}1. 全局代理${RESET}" >&2
-  echo -e "${WHITE}2. 智能分流${RESET}" >&2
+  echo -e "${WHITE}1. 智能分流 (推荐: 大陆 IP/域名直连，境外流量走落地出口)${RESET}" >&2
+  echo -e "${WHITE}2. 全局代理 (全部流量强制走落地出口)${RESET}" >&2
   echo -e "${GRAY}------------------------------------------------------------${RESET}" >&2
   local rm_opt
-  read -p "选项 [默认 1]: " rm_opt
+  read -p "请选择分流模式 [默认 1: 智能分流]: " rm_opt
   if [ "${rm_opt:-1}" = "2" ]; then
-    printf 'split'
-  else
     printf 'global'
+  else
+    printf 'split'
   fi
 }
 
@@ -1926,16 +1982,13 @@ EOF
   }
 
   # 是否启用本地 10003 vless-xhttp-in 会话中心 (支持 Argo-xhttp、Reality-xhttp 以及上下行分离 Session 共享)
-  local has_xhttp_hub=false xh_fb_snippet=""
+  local has_xhttp_hub=false
   if [ "$(get_val DISABLE_ARGO)" != "true" ] || [ -n "$xhttp_port" ]; then
     has_xhttp_hub=true
-    xh_fb_snippet=', "fallbacks": [{ "dest": 10003, "xver": 0 }]'
   fi
 
-  # 1. Argo 穿透入站组
+  # 1. Argo 穿透入站组 (始终仅绑定 127.0.0.1，防扫描与公网暴露)
   if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
-    local argo_listen="127.0.0.1"
-    [ "$(get_val XHTTP_DOWN_MODE)" = "cdn" ] && argo_listen="$listen_addr"
     local argo_fallbacks='          {
             "path": "/vmess-ws",
             "dest": 10000,
@@ -1959,7 +2012,7 @@ EOF
     append_inbound '    {
       "tag": "argo-dispatcher-in",
       "port": 8001,
-      "listen": "'"$argo_listen"'",
+      "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": {
         "clients": [{ "id": "'"$uuid"'", "level": 0 }],
@@ -2018,6 +2071,49 @@ EOF
     }'
   fi
 
+  # 1.5 外部 CDN (如 CloudFront) 安全下行回源入站 (TLS 加密回源，绝不在公网裸奔)
+  local down_mode down_port down_proto
+  down_mode="$(get_val XHTTP_DOWN_MODE)"
+  down_port="$(get_val CDN_ORIGIN_PORT "8443")"
+  down_proto="$(get_val CDN_ORIGIN_PROTO "https")"
+
+  if [ "$down_mode" = "cdn" ] && [ -n "$down_port" ]; then
+    local cdn_stream_snippet=""
+    if [ "$down_proto" = "https" ]; then
+      local cdn_cert_dom c_file="" k_file=""
+      cdn_cert_dom="$(get_val TROJAN_CERT_DOMAIN)"
+      [ -z "$cdn_cert_dom" ] && cdn_cert_dom="$(get_val SERVER_DOMAIN)"
+      if [ -n "$cdn_cert_dom" ] && [ -f "$DOMAIN_CERT_DIR/$cdn_cert_dom/cert.pem" ]; then
+        c_file="$DOMAIN_CERT_DIR/$cdn_cert_dom/cert.pem"
+        k_file="$DOMAIN_CERT_DIR/$cdn_cert_dom/key.pem"
+      else
+        ensure_self_signed_cert
+        c_file="$DOMAIN_CERT_DIR/self_signed/cert.pem"
+        k_file="$DOMAIN_CERT_DIR/self_signed/key.pem"
+      fi
+      cdn_stream_snippet='"network": "tcp", "security": "tls", "tlsSettings": { "certificates": [{ "certificateFile": "'"$c_file"'", "keyFile": "'"$k_file"'" }] }'
+    else
+      cdn_stream_snippet='"network": "tcp"'
+    fi
+
+    append_inbound '    {
+      "tag": "cdn-origin-in",
+      "port": '"$down_port"',
+      "listen": "'"$listen_addr"'",
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "'"$uuid"'", "level": 0 }],
+        "decryption": "none",
+        "fallbacks": [{ "dest": 10003, "xver": 0 }]
+      },
+      "streamSettings": {
+        '"$cdn_stream_snippet"'
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
+    }'
+  fi
+
+  # 本地 xhttp 会话汇聚中心 (path 设为 / 前缀通配，完全向下兼容旧订阅 /xhttp 与新订阅 /vless-xhttp)
   if [ "$has_xhttp_hub" = "true" ]; then
     append_inbound '    {
       "tag": "vless-xhttp-in",
@@ -2025,7 +2121,7 @@ EOF
       "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": { "clients": [{ "id": "'"$uuid"'" }], "decryption": "none" },
-      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/vless-xhttp", "mode": "auto" } },
+      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/", "mode": "auto" } },
       "sniffing": {
         "enabled": true,
         "destOverride": ["http", "tls", "quic"],
@@ -2034,7 +2130,7 @@ EOF
     }'
   fi
 
-  # 2. 直连 Reality 入站 (TCP Vision)
+  # 2. 直连 Reality 入站 (TCP Vision，纯粹直连收拢攻击面)
   if [ -n "$reality_port" ] && [ -n "$reality_priv" ]; then
     append_inbound '    {
       "tag": "reality-in",
@@ -2043,7 +2139,7 @@ EOF
       "protocol": "vless",
       "settings": {
         "clients": [{ "id": "'"$uuid"'", "flow": "xtls-rprx-vision" }],
-        "decryption": "none"'"$xh_fb_snippet"'
+        "decryption": "none"
       },
       "streamSettings": {
         "network": "tcp",
@@ -2125,7 +2221,7 @@ EOF
     }'
   fi
 
-  # 5. 直连 Trojan-TCP (支持 ACME 证书与自签证书)
+  # 5. 直连 Trojan-TCP (支持 ACME 证书与自签证书，纯粹直连收拢攻击面)
   if [ -n "$trojan_port" ]; then
     local trojan_cert_dom cert_snippet c_file="" k_file=""
     trojan_cert_dom="$(get_val TROJAN_CERT_DOMAIN)"
@@ -2144,7 +2240,7 @@ EOF
       "port": '"$trojan_port"',
       "listen": "'"$listen_addr"'",
       "protocol": "trojan",
-      "settings": { "clients": [{ "password": "'"$trojan_pass"'" }]'"$xh_fb_snippet"' },
+      "settings": { "clients": [{ "password": "'"$trojan_pass"'" }] },
       "streamSettings": { "network": "tcp", '"$cert_snippet"' },
       "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
     }'
@@ -3088,14 +3184,20 @@ do_rollback() {
 menu_update() {
   clear
   echo -e "${GREEN}==================== 在线升级 ====================${RESET}"
-  local cur_xray="未安装"
+  local cur_xray="未安装" cur_cf="未安装" cur_km="未安装"
   [ -x "$XRAY_BIN" ] && cur_xray="$("$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}')"
+  [ -x "$CF_BIN" ] && cur_cf="$("$CF_BIN" version 2>/dev/null | head -1 | awk '{print $2, $3}')"
+  [ -x "$KM_BIN" ] && cur_km="已就绪"
   echo -e "当前核心版本: ${CYAN}${cur_xray}${RESET}"
+  [ -x "$CF_BIN" ] && echo -e "当前 cloudflared : ${CYAN}${cur_cf}${RESET}"
+  [ -x "$KM_BIN" ] && echo -e "当前 komari-agent: ${CYAN}${cur_km}${RESET}"
   echo -e "${GREEN}----------------------------------------------------${RESET}"
   echo -e "${WHITE} 1. 升级 Xray 核心${RESET}"
   echo -e "${WHITE} 2. 更新管理脚本${RESET}"
+  echo -e "${WHITE} 3. 升级 cloudflared 组件${RESET}"
+  echo -e "${WHITE} 4. 升级 komari 监控探针${RESET}"
   if [ -f "$APP_DIR/xray.sh.bak" ]; then
-    echo -e "${WHITE} 3. 回退管理脚本${RESET}"
+    echo -e "${WHITE} 5. 回退管理脚本${RESET}"
   fi
   echo -e "${WHITE} 0. 返回面板${RESET}"
   echo -e "${GREEN}----------------------------------------------------${RESET}"
@@ -3110,6 +3212,20 @@ menu_update() {
       ;;
     2) do_update_script ;;
     3)
+      if download_cloudflared; then
+        log "cloudflared 组件已更新至最新版本！"
+        start_cloudflared
+      fi
+      press_any_key
+      ;;
+    4)
+      if download_komari; then
+        log "komari-agent 探针已更新至最新版本！"
+        start_komari
+      fi
+      press_any_key
+      ;;
+    5)
       if [ -f "$APP_DIR/xray.sh.bak" ]; then
         do_rollback
       else
@@ -3558,12 +3674,8 @@ menu_config() {
           set_val REALITY_PORT "$new_rp"
           set_val XHTTP_PORT "$new_xp"
           set_val REALITY_DOMAIN "${new_rd:-www.iij.ad.jp}"
-          [ -n "$cur_rp" ] && [ "$cur_rp" != "未启用" ] && [ "$cur_rp" != "$new_rp" ] && close_firewall_port "$cur_rp" tcp
-          [ -n "$cur_xp" ] && [ "$cur_xp" != "未启用" ] && [ "$cur_xp" != "$new_xp" ] && close_firewall_port "$cur_xp" tcp
-          [ -n "$new_rp" ] && open_firewall_port "$new_rp" tcp
-          [ -n "$new_xp" ] && open_firewall_port "$new_xp" tcp
           config_modified=1
-          log "Reality 配置已更新"
+          log "Reality 配置已更新 (待保存后统一生效)"
           sleep 0.5
         fi
         ;;
@@ -3580,12 +3692,10 @@ menu_config() {
         fi
         local chk_sp="$cur_sp"; [ "$chk_sp" = "未启用" ] && chk_sp=""
         if [ "$new_sp" != "$chk_sp" ] || [ -n "$new_pass" ]; then
-          [ -n "$cur_sp" ] && [ "$cur_sp" != "未启用" ] && [ "$cur_sp" != "$new_sp" ] && close_firewall_port "$cur_sp" both
           set_val SS_PORT "$new_sp"
           [ -n "$new_pass" ] && set_val SS_PASS "$new_pass"
-          [ -n "$new_sp" ] && open_firewall_port "$new_sp" both
           config_modified=1
-          log "Shadowsocks 已更新"
+          log "Shadowsocks 已更新 (待保存后统一生效)"
           sleep 0.5
         fi
         ;;
@@ -3606,13 +3716,11 @@ menu_config() {
         fi
         local chk_s5="$cur_s5"; [ "$chk_s5" = "未启用" ] && chk_s5=""
         if [ "$new_s5" != "$chk_s5" ] || [ -n "$new_s5_u" ] || [ -n "$new_s5_p" ]; then
-          [ -n "$cur_s5" ] && [ "$cur_s5" != "未启用" ] && [ "$cur_s5" != "$new_s5" ] && close_firewall_port "$cur_s5" both
           set_val S5_PORT "$new_s5"
           [ -n "$new_s5_u" ] && set_val S5_USER "$new_s5_u"
           [ -n "$new_s5_p" ] && set_val S5_PASS "$new_s5_p"
-          [ -n "$new_s5" ] && open_firewall_port "$new_s5" both
           config_modified=1
-          log "SOCKS5 已更新"
+          log "SOCKS5 已更新 (待保存后统一生效)"
           sleep 0.5
         fi
         ;;
@@ -3629,12 +3737,10 @@ menu_config() {
         fi
         local chk_tp="$cur_tp"; [ "$chk_tp" = "未启用" ] && chk_tp=""
         if [ "$new_tp" != "$chk_tp" ] || [ -n "$new_tr_p" ]; then
-          [ -n "$cur_tp" ] && [ "$cur_tp" != "未启用" ] && [ "$cur_tp" != "$new_tp" ] && close_firewall_port "$cur_tp" tcp
           set_val TROJAN_PORT "$new_tp"
           [ -n "$new_tr_p" ] && set_val TROJAN_PASS "$new_tr_p"
-          [ -n "$new_tp" ] && open_firewall_port "$new_tp" tcp
           config_modified=1
-          log "Trojan 已更新"
+          log "Trojan 已更新 (待保存后统一生效)"
           sleep 0.5
         fi
         ;;
@@ -3714,16 +3820,17 @@ menu_config() {
         echo -e "说明: xhttp 允许上行与下行走不同线路。当前默认同源走 Cloudflare CDN。"
         echo -e "${WHITE} 1. 默认同源 (上下行均走 Cloudflare CDN)${RESET}"
         echo -e "${WHITE} 2. 下行复用本机 Reality-xhttp (推荐: 规避上行阻断且下行直连高速)${RESET}"
-        echo -e "${WHITE} 3. 下行自定义 CDN (如 AWS CloudFront 等)${RESET}"
+        echo -e "${WHITE} 3. 下行自定义 CDN (如 AWS CloudFront 等，支持全程 TLS 加密回源)${RESET}"
         echo -e "${WHITE} 0. 保持不变${RESET}"
         read -p "请选择下行策略 [0-3, 默认 0]: " xh_down_opt
         case "$xh_down_opt" in
           1)
             if [ -n "$cur_down_mode" ]; then
-              [ "$cur_down_mode" = "cdn" ] && close_firewall_port 8001 tcp
               set_val XHTTP_DOWN_MODE ""
               set_val XHTTP_DOWN_DOMAIN ""
               set_val XHTTP_DOWN_HOST ""
+              set_val CDN_ORIGIN_PORT ""
+              set_val CDN_ORIGIN_PROTO ""
               config_modified=1
               log "已恢复 xhttp 默认同源模式"
             fi
@@ -3732,10 +3839,11 @@ menu_config() {
             if [ "$cur_xp" = "未启用" ] && [ "$cur_rp" = "未启用" ]; then
               warn "本机未开启 Reality 服务，无法复用 Reality 作为下行！"
             else
-              [ "$cur_down_mode" = "cdn" ] && close_firewall_port 8001 tcp
               set_val XHTTP_DOWN_MODE "reality"
               set_val XHTTP_DOWN_DOMAIN ""
               set_val XHTTP_DOWN_HOST ""
+              set_val CDN_ORIGIN_PORT ""
+              set_val CDN_ORIGIN_PROTO ""
               config_modified=1
               log "已启用 xhttp 下行复用本机 Reality"
             fi
@@ -3750,13 +3858,30 @@ menu_config() {
                 read -p "请输入下行 CDN 优选 IP/主机名 [回车默认使用域名]: " in_down_host
                 in_down_host="$(printf '%s' "$in_down_host" | tr -d '[:space:]')"
                 [ -z "$in_down_host" ] && in_down_host="$in_down_dom"
+
+                read -p "请输入 CDN 回源端口 [默认 8443]: " in_down_port
+                in_down_port="$(printf '%s' "$in_down_port" | tr -d '[:space:]')"
+                [ -z "$in_down_port" ] && in_down_port="8443"
+
+                echo -e "请选择 CDN 回源协议:"
+                echo -e "  1. HTTPS (推荐，全程 TLS 加密回源，防公网明文嗅探)"
+                echo -e "  2. HTTP (明文传输，有被探测与劫持风险)"
+                read -p "请选择协议 [默认 1: HTTPS]: " in_proto_opt
+                local in_down_proto="https"
+                [ "$in_proto_opt" = "2" ] && in_down_proto="http"
+
                 set_val XHTTP_DOWN_MODE "cdn"
                 set_val XHTTP_DOWN_DOMAIN "$in_down_dom"
                 set_val XHTTP_DOWN_HOST "$in_down_host"
-                open_firewall_port 8001 tcp
+                set_val CDN_ORIGIN_PORT "$in_down_port"
+                set_val CDN_ORIGIN_PROTO "$in_down_proto"
                 config_modified=1
-                log "已配置 xhttp 下行自定义 CDN: ${in_down_dom}"
-                echo -e "${YELLOW}提示: 请将 ${in_down_dom} 的回源地址指向本机公网 IP，回源协议 HTTP，回源端口 8001${RESET}"
+                log "已配置 xhttp 下行自定义 CDN: ${in_down_dom} (回源: ${in_down_proto^^} ${in_down_port})"
+                if [ "$in_down_proto" = "https" ]; then
+                  echo -e "${YELLOW}提示: 请在 CDN 控制台将源站协议设为 HTTPS，端口设为 ${in_down_port}。若使用自签证书，请关闭源站证书强制校验。${RESET}"
+                else
+                  echo -e "${YELLOW}警告: 您选择了 HTTP 回源，流量将在公网明文传输！请确保仅用于测试。${RESET}"
+                fi
               fi
             fi
             ;;
@@ -3820,8 +3945,9 @@ menu_config() {
               sleep 0.5
               ;;
             *)
+              log "配置已变更，正在同步防火墙端口并重启服务生效..."
+              sync_firewall_changes "$env_bak" "$ENV_FILE"
               rm -f "$env_bak" 2>/dev/null || true
-              log "配置已变更，正在重启服务生效..."
               do_restart
               ;;
           esac
