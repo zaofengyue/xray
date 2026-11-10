@@ -10,6 +10,7 @@ const PRESET_PORT           = ''; // HTTP 外部服务端口（默认自动搜�
 const PRESET_NAME           = ''; // 节点名称前缀（留空自动识别 IP 所在国家与组织，非阻塞）
 const PRESET_IP             = ''; // 自定义公网 IP（留空自动探测）
 const PRESET_SUB            = ''; // 订阅路径后缀（默认 'sub'，即 /sub）
+const PRESET_SUB_TOKEN      = ''; // 订阅安全访问令牌 Token（留空不设鉴权，设置后需 /sub?token=xxx 访问）
 
 // ── 2. Argo 隧道配置 ──
 const PRESET_DISABLE_ARGO      = ''; // 填 'true' 禁用 Argo，留空则启用
@@ -19,7 +20,12 @@ const PRESET_ARGO_PORT         = ''; // Argo 内部聚合分流端口（默认 8
 const PRESET_ARGO_PROTOCOL     = ''; // Argo 隧道协议（默认留空走高速 QUIC 链路，可选 'http2'、'quic'）
 const PRESET_CF_PREFER_HOST    = ''; // Cloudflare 优选域名/IP（留空自动从优选池中选择）
 
-// ── 3. 可选直连协议配置（填写端口则启动对应协议，留空不启动）──
+// ── 3. xhttp 进阶配置（上下行分离）──
+const PRESET_XHTTP_DOWN_MODE   = ''; // 下行策略: 留空默认同源走 Cloudflare，'reality' 下行复用 Reality，'cdn' 下行第三方 CDN (如 AWS CloudFront)
+const PRESET_XHTTP_DOWN_DOMAIN = ''; // 下行 CDN 域名 (如 d123.cloudfront.net)
+const PRESET_XHTTP_DOWN_HOST   = ''; // 下行 CDN 优选 IP/主机名 (留空默认与域名相同)
+
+// ── 4. 可选直连协议配置（填写端口则启动对应协议，留空不启动）──
 const PRESET_REALITY_PORT   = ''; // VLESS-Reality 端口 (TCP, 推荐 443 或自定义高位端口)
 const PRESET_REALITY_DOMAIN = ''; // Reality 伪装域名（留空自动按国家地域自适应匹配合规站点）
 const PRESET_SS_PORT        = ''; // Shadowsocks 2022 端口 (TCP/UDP)
@@ -28,16 +34,15 @@ const PRESET_S5_PORT        = ''; // SOCKS5 代理端口 (TCP/UDP)
 const PRESET_S5_USER        = ''; // SOCKS5 用户名 (留空默认 UUID 前 8 位)
 const PRESET_S5_PASS        = ''; // SOCKS5 密码 (留空默认 UUID 后 12 位)
 
-// ── 4. Komari 探针监控配置（可选，填写则上报监控，留空不启动）──
+// ── 5. Komari 探针监控配置（可选，填写则上报监控，留空不启动）──
 const PRESET_KOMARI_DOMAIN  = ''; // Komari 服务端域名（如 komari.example.com）
 const PRESET_KOMARI_TOKEN   = ''; // Komari 探针密钥 Token
 
-// ── 5. 日志与推送功能配置 ──
+// ── 6. 日志与推送功能配置 ──
 const PRESET_SHOW_LOG          = ''; // 是否在控制台显示订阅配置信息（默认 'true'，填 'false' 关闭显示）
 const PRESET_LOG_CLEAR_MINUTES = ''; // 控制台显示配置后自动清理的等待时间（默认 '2' 分钟，填 '0' 则不清除）
 const PRESET_TG_BOT_TOKEN      = ''; // Telegram Bot Token（用于推送服务配置）
 const PRESET_TG_CHAT_ID        = ''; // Telegram Chat ID
-const PRESET_SINGLE_PROCESS    = ''; // 填 'true' 开启极致单进程（禁用 Argo 时由核心独占常驻）
 // ==============================================================================
 
 const { execSync, spawn, spawnSync, execFile, execFileSync } = require('child_process');
@@ -672,12 +677,17 @@ async function main() {
   const UUID = getOrGenerateUUID();
   const TROJAN_PASS = UUID;
   const SUB_PATH = (PRESET_SUB || process.env.SUB || 'sub').trim().replace(/^\/+/, '');
+  const SUB_TOKEN = (PRESET_SUB_TOKEN || process.env.SUB_TOKEN || '').trim();
   const INBOUND_PORT = parseInt(PRESET_PORT || process.env.PORT || '0', 10) || await findAvailablePort(3000);
   const ARGO_PORT = parseInt(PRESET_ARGO_PORT || process.env.ARGO_PORT || '8001', 10);
   const DISABLE_ARGO = (PRESET_DISABLE_ARGO || process.env.DISABLE_ARGO || '').toLowerCase() === 'true';
   const ARGO_DOMAIN = (PRESET_ARGO_DOMAIN || process.env.ARGO_DOMAIN || '').trim();
   const ARGO_AUTH = (PRESET_ARGO_AUTH || process.env.ARGO_AUTH || '').trim();
   const ARGO_PROTOCOL = (PRESET_ARGO_PROTOCOL || process.env.ARGO_PROTOCOL || '').trim();
+
+  const XHTTP_DOWN_MODE = (PRESET_XHTTP_DOWN_MODE || process.env.XHTTP_DOWN_MODE || '').trim().toLowerCase();
+  const XHTTP_DOWN_DOMAIN = (PRESET_XHTTP_DOWN_DOMAIN || process.env.XHTTP_DOWN_DOMAIN || '').trim();
+  const XHTTP_DOWN_HOST = (PRESET_XHTTP_DOWN_HOST || process.env.XHTTP_DOWN_HOST || '').trim();
 
   const REALITY_PORT = (PRESET_REALITY_PORT || process.env.REALITY_PORT || '').trim();
   const SS_PORT = (PRESET_SS_PORT || process.env.SS_PORT || '').trim();
@@ -692,7 +702,7 @@ async function main() {
   // 2. 准备核心二进制
   const xrayBin = await prepareXrayCore();
 
-  // 3. 异步并发地理探测与节点名称预解析 (0 阻塞)
+  // 3. 异步并发地理探测与节点名称预解析
   let geoCountry = 'DEFAULT';
   let geoOrg = '';
   let PUBLIC_IP = (PRESET_IP || process.env.PUBLIC_IP || process.env.IP || '').trim();
@@ -713,6 +723,8 @@ async function main() {
       NODE_NAME = geoCountry && geoOrg ? `${geoCountry}-${geoOrg.replace(/[^a-zA-Z0-9]/g, '')}` : (geoCountry || 'xray');
     }
   })();
+
+  await geoPromise; // 等待地理探测与 IP 解析完成，确保后续 Reality 伪装域名匹配真实的地理区域
 
   // 4. 构建 Xray 配置 JSON
   const inbounds = [];
@@ -777,7 +789,8 @@ async function main() {
         protocol: 'vless',
         settings: {
           clients: [{ id: UUID, flow: 'xtls-rprx-vision' }],
-          decryption: 'none'
+          decryption: 'none',
+          fallbacks: [{ dest: V_XHTTP_PORT, xver: 0 }]
         },
         streamSettings: {
           network: 'tcp',
@@ -899,6 +912,13 @@ async function main() {
 
     // B. /sub 节点订阅接口
     if (pathname === `/${SUB_PATH}` || pathname === `/${SUB_PATH}/`) {
+      if (SUB_TOKEN) {
+        const tokenParam = urlObj.searchParams.get('token') || '';
+        if (!timingSafeEqualStr(tokenParam, SUB_TOKEN)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Forbidden: Invalid Subscription Token');
+        }
+      }
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
         'Cache-Control': 'no-cache, no-store'
@@ -921,44 +941,48 @@ async function main() {
     res.end('Not Found');
   }
 
+  // WebSocket 多协议分流处理 (供内部 argoServer 与外部 mainServer 共同复用)
+  function handleUpgrade(req, socket, head) {
+    const reqPath = req.url.split('?')[0];
+    let targetPort = null;
+    if (reqPath === WS_PATH_VLESS)       targetPort = V_VLESS_PORT;
+    else if (reqPath === WS_PATH_VMESS)  targetPort = V_VMESS_PORT;
+    else if (reqPath === WS_PATH_TROJAN) targetPort = V_TROJAN_PORT;
+    else {
+      socket.destroy();
+      return;
+    }
+
+    const proxy = net.connect(targetPort, '127.0.0.1', () => {
+      const safeHeaders = Object.entries(req.headers)
+        .filter(([k, v]) => !/[\r\n]/.test(k) && !/[\r\n]/.test(String(v)))
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\r\n');
+      proxy.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${safeHeaders}\r\n\r\n`);
+      if (head && head.length > 0) proxy.write(head);
+      socket.pipe(proxy);
+      proxy.pipe(socket);
+    });
+
+    proxy.on('error', () => socket.destroy());
+    socket.on('error', () => proxy.destroy());
+  }
+
   if (!DISABLE_ARGO) {
     const argoServer = http.createServer(handleHttp);
     argoServer.on('error', (e) => console.error(`[Argo] 内部服务异常: ${e.message}`));
+    argoServer.on('upgrade', handleUpgrade);
 
-    // WebSocket 多协议分流
-    argoServer.on('upgrade', (req, socket, head) => {
-      const reqPath = req.url.split('?')[0];
-      let targetPort = null;
-      if (reqPath === WS_PATH_VLESS)       targetPort = V_VLESS_PORT;
-      else if (reqPath === WS_PATH_VMESS)  targetPort = V_VMESS_PORT;
-      else if (reqPath === WS_PATH_TROJAN) targetPort = V_TROJAN_PORT;
-      else {
-        socket.destroy();
-        return;
-      }
-
-      const proxy = net.connect(targetPort, '127.0.0.1', () => {
-        const safeHeaders = Object.entries(req.headers)
-          .filter(([k, v]) => !/[\r\n]/.test(k) && !/[\r\n]/.test(String(v)))
-          .map(([k, v]) => `${k}: ${v}`)
-          .join('\r\n');
-        proxy.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${safeHeaders}\r\n\r\n`);
-        if (head && head.length > 0) proxy.write(head);
-        socket.pipe(proxy);
-        proxy.pipe(socket);
-      });
-
-      proxy.on('error', () => socket.destroy());
-      socket.on('error', () => proxy.destroy());
-    });
-
-    argoServer.listen(ARGO_PORT, '127.0.0.1', () => {
-      console.log(`[Argo] 多协议单端口复用引擎运行于 127.0.0.1:${ARGO_PORT}`);
+    const argoListenHost = XHTTP_DOWN_MODE === 'cdn' ? '0.0.0.0' : '127.0.0.1';
+    argoServer.listen(ARGO_PORT, argoListenHost, () => {
+      console.log(`[Argo] 多协议单端口复用引擎运行于 ${argoListenHost}:${ARGO_PORT}`);
     });
   }
 
-  // 6. 启动外部直连主 HTTP 服务
+  // 6. 启动外部直连主 HTTP 服务 (挂载 Web、订阅、xhttp 及直连 WebSocket 支持)
   const mainServer = http.createServer(handleHttp);
+  mainServer.on('error', (e) => console.error(`[HTTP] 主服务异常: ${e.message}`));
+  mainServer.on('upgrade', handleUpgrade);
   mainServer.listen(INBOUND_PORT, '0.0.0.0', () => {
     console.log(`[HTTP] Web 伪装站点与订阅服务已就绪: http://0.0.0.0:${INBOUND_PORT}`);
   });
@@ -969,9 +993,70 @@ async function main() {
     const name = NODE_NAME || 'xray';
     const formattedIp = PUBLIC_IP && PUBLIC_IP.includes(':') ? `[${PUBLIC_IP}]` : PUBLIC_IP;
 
+    let xhExtraParam = '';
+    if (XHTTP_DOWN_MODE === 'reality' && REALITY_PORT && global.REALITY_PUB_KEY && formattedIp) {
+      const rxAddr = formattedIp.replace(/^\[/, '').replace(/\]$/, '');
+      const extraObj = {
+        xmux: {
+          maxConcurrency: '16-32',
+          maxConnections: 0,
+          cMaxReuseTimes: 0,
+          hMaxRequestTimes: '600-900',
+          hMaxReusableSecs: '1800-3000'
+        },
+        downloadSettings: {
+          address: rxAddr,
+          port: parseInt(REALITY_PORT, 10),
+          network: 'xhttp',
+          security: 'reality',
+          realitySettings: {
+            serverName: realityDomainFinal,
+            fingerprint: 'chrome',
+            show: false,
+            publicKey: global.REALITY_PUB_KEY,
+            shortId: '',
+            spiderX: ''
+          },
+          xhttpSettings: {
+            path: XHTTP_PATH_VLESS,
+            mode: 'auto'
+          }
+        }
+      };
+      xhExtraParam = `&extra=${encodeURIComponent(JSON.stringify(extraObj))}`;
+    } else if (XHTTP_DOWN_MODE === 'cdn' && XHTTP_DOWN_DOMAIN) {
+      const downHost = XHTTP_DOWN_HOST || XHTTP_DOWN_DOMAIN;
+      const extraObj = {
+        xmux: {
+          maxConcurrency: '16-32',
+          maxConnections: 0,
+          cMaxReuseTimes: 0,
+          hMaxRequestTimes: '600-900',
+          hMaxReusableSecs: '1800-3000'
+        },
+        downloadSettings: {
+          address: downHost,
+          port: 443,
+          network: 'xhttp',
+          security: 'tls',
+          tlsSettings: {
+            serverName: XHTTP_DOWN_DOMAIN,
+            alpn: ['h2', 'http/1.1'],
+            fingerprint: 'chrome'
+          },
+          xhttpSettings: {
+            path: XHTTP_PATH_VLESS,
+            host: XHTTP_DOWN_DOMAIN,
+            mode: 'auto'
+          }
+        }
+      };
+      xhExtraParam = `&extra=${encodeURIComponent(JSON.stringify(extraObj))}`;
+    }
+
     if (!DISABLE_ARGO) {
       // A. VLESS-xhttp
-      list.push(`vless://${UUID}@${preferHost}:443?encryption=none&security=tls&type=xhttp&host=${currentHost}&path=${encodeURIComponent(XHTTP_PATH_VLESS)}&mode=packet-up&sni=${currentHost}#${encodeURIComponent(name + '-VLESS-xhttp')}`);
+      list.push(`vless://${UUID}@${preferHost}:443?encryption=none&security=tls&type=xhttp&host=${currentHost}&path=${encodeURIComponent(XHTTP_PATH_VLESS)}&mode=packet-up&sni=${currentHost}${xhExtraParam}#${encodeURIComponent(name + '-VLESS-xhttp')}`);
       // B. VLESS-WS
       list.push(`vless://${UUID}@${preferHost}:443?encryption=none&security=tls&type=ws&host=${currentHost}&path=${encodeURIComponent(WS_PATH_VLESS)}&sni=${currentHost}#${encodeURIComponent(name + '-VLESS-WS')}`);
       // C. VMess-WS
@@ -1023,7 +1108,6 @@ async function main() {
 
   // 8. 优选域名选择与初始订阅构建
   const preferHost = PRESET_CF_PREFER_HOST || process.env.CF_PREFER_HOST || CF_PREFER_HOST_CANDIDATES[0];
-  await geoPromise; // 等待地理探测完成
   buildSubscription(preferHost, currentArgoHost);
 
   // 9. 启动 Cloudflare Tunnel
@@ -1078,6 +1162,9 @@ async function main() {
     } catch (err) {
       console.error(`[Argo] 隧道启动异常: ${err.message}`);
     }
+  } else {
+    console.log('[Argo] 隧道已被禁用 (DISABLE_ARGO=true)，仅运行直连与本地分流服务');
+    onTunnelReady('');
   }
 
   // 10. 启动 Komari 探针 (可选)
@@ -1111,11 +1198,12 @@ async function main() {
     const showLog = (PRESET_SHOW_LOG || process.env.SHOW_LOG || 'true').toLowerCase() !== 'false';
     if (!showLog) return;
 
+    const subTokenQuery = SUB_TOKEN ? `?token=${encodeURIComponent(SUB_TOKEN)}` : '';
     console.log('\n============================================================');
     console.log(`🚀 Xray 多功能综合穿透代理服务已就绪`);
     console.log(`📌 节点标识: ${NODE_NAME} (地区: ${geoCountry})`);
-    console.log(`🔗 外部订阅: http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}`);
-    if (!DISABLE_ARGO) console.log(`🛡️ Argo 域名: ${host}`);
+    console.log(`🔗 外部订阅: http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`);
+    if (!DISABLE_ARGO && host) console.log(`🛡️ Argo 域名: ${host}`);
     console.log('---------------- 节点订阅明细 ----------------');
     for (const link of list) {
       console.log(link);
@@ -1138,10 +1226,13 @@ async function main() {
     const chatId = (PRESET_TG_CHAT_ID || process.env.TG_CHAT_ID || '').trim();
     if (!token || !chatId) return;
 
-    const text = `🎉 *Xray 节点部署成功通知*\n` +
-      `*节点*: \`${NODE_NAME}\`\n` +
-      `*域名*: \`${host}\`\n` +
-      `*订阅*: \`http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}\``;
+    const subTokenQuery = SUB_TOKEN ? `?token=${encodeURIComponent(SUB_TOKEN)}` : '';
+    let text = `🎉 *Xray 节点部署成功通知*\n` +
+      `*节点*: \`${NODE_NAME}\`\n`;
+    if (!DISABLE_ARGO && host) {
+      text += `*域名*: \`${host}\`\n`;
+    }
+    text += `*订阅*: \`http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}\``;
 
     const payload = JSON.stringify({
       chat_id: chatId,

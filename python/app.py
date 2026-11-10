@@ -10,6 +10,7 @@ CONF_PORT           = ""  # HTTP 外部服务端口（默认自动搜寻可用�
 CONF_NAME           = ""  # 节点名称前缀（留空自动识别 IP 所在国家与组织，非阻塞）
 CONF_IP             = ""  # 自定义公网 IP（留空自动探测）
 CONF_SUB            = ""  # 订阅路径后缀（默认 "sub"，即 /sub）
+CONF_SUB_TOKEN      = ""  # 订阅安全访问令牌 Token（留空不设鉴权，设置后需 /sub?token=xxx 访问）
 
 # ── 2. Argo 隧道配置 ──
 CONF_DISABLE_ARGO      = ""  # 填 "true" 禁用 Argo，留空则启用
@@ -19,7 +20,12 @@ CONF_ARGO_PORT         = ""  # Argo 内部聚合分流端口（默认 8001）
 CONF_ARGO_PROTOCOL     = ""  # Argo 隧道协议（默认留空走高速 QUIC 链路，可选 "http2"、"quic"）
 CONF_CF_PREFER_HOST    = ""  # Cloudflare 优选域名/IP（留空自动从优选池中选择）
 
-# ── 3. 可选直连协议配置（填写端口则启动对应协议，留空不启动）──
+# ── 3. xhttp 进阶配置（上下行分离）──
+CONF_XHTTP_DOWN_MODE   = ""  # 下行策略: 留空默认同源走 Cloudflare，'reality' 下行复用 Reality，'cdn' 下行第三方 CDN (如 AWS CloudFront)
+CONF_XHTTP_DOWN_DOMAIN = ""  # 下行 CDN 域名 (如 d123.cloudfront.net)
+CONF_XHTTP_DOWN_HOST   = ""  # 下行 CDN 优选 IP/主机名 (留空默认与域名相同)
+
+# ── 4. 可选直连协议配置（填写端口则启动对应协议，留空不启动）──
 CONF_REALITY_PORT   = ""  # VLESS-Reality 端口 (TCP, 推荐 443 或自定义高位端口)
 CONF_REALITY_DOMAIN = ""  # Reality 伪装域名（留空自动按国家地域自适应匹配合规站点）
 CONF_SS_PORT        = ""  # Shadowsocks 2022 端口 (TCP/UDP)
@@ -28,11 +34,11 @@ CONF_S5_PORT        = ""  # SOCKS5 代理端口 (TCP/UDP)
 CONF_S5_USER        = ""  # SOCKS5 用户名 (留空默认 UUID 前 8 位)
 CONF_S5_PASS        = ""  # SOCKS5 密码 (留空默认 UUID 后 12 位)
 
-# ── 4. Komari 探针监控配置（可选，填写则上报监控，留空不启动）──
+# ── 5. Komari 探针监控配置（可选，填写则上报监控，留空不启动）──
 CONF_KOMARI_DOMAIN  = ""  # Komari 服务端域名（如 komari.example.com）
 CONF_KOMARI_TOKEN   = ""  # Komari 探针密钥 Token
 
-# ── 5. 日志与推送功能配置 ──
+# ── 6. 日志与推送功能配置 ──
 CONF_SHOW_LOG          = ""  # 是否在控制台显示订阅配置信息（默认 "true"，填 "false" 关闭显示）
 CONF_LOG_CLEAR_MINUTES = ""  # 控制台显示配置后自动清理的等待时间（默认 "2" 分钟，填 "0" 则不清除）
 CONF_TG_BOT_TOKEN      = ""  # Telegram Bot Token（用于推送服务配置）
@@ -40,6 +46,7 @@ CONF_TG_CHAT_ID        = ""  # Telegram Chat ID
 # ==============================================================================
 
 import base64
+import hmac
 import http.client
 import http.server
 import json
@@ -501,12 +508,17 @@ def main():
     UUID = get_or_generate_uuid()
     TROJAN_PASS = UUID
     SUB_PATH = (CONF_SUB or os.environ.get("SUB", "sub")).strip().lstrip("/")
+    SUB_TOKEN = (CONF_SUB_TOKEN or os.environ.get("SUB_TOKEN", "")).strip()
     INBOUND_PORT = int(CONF_PORT or os.environ.get("PORT") or find_available_port(3000))
     ARGO_PORT = int(CONF_ARGO_PORT or os.environ.get("ARGO_PORT", "8001"))
     DISABLE_ARGO = (CONF_DISABLE_ARGO or os.environ.get("DISABLE_ARGO", "")).lower() == "true"
     ARGO_DOMAIN = (CONF_ARGO_DOMAIN or os.environ.get("ARGO_DOMAIN", "")).strip()
     ARGO_AUTH = (CONF_ARGO_AUTH or os.environ.get("ARGO_AUTH", "")).strip()
     ARGO_PROTOCOL = (CONF_ARGO_PROTOCOL or os.environ.get("ARGO_PROTOCOL", "")).strip()
+
+    XHTTP_DOWN_MODE = (CONF_XHTTP_DOWN_MODE or os.environ.get("XHTTP_DOWN_MODE", "")).strip().lower()
+    XHTTP_DOWN_DOMAIN = (CONF_XHTTP_DOWN_DOMAIN or os.environ.get("XHTTP_DOWN_DOMAIN", "")).strip()
+    XHTTP_DOWN_HOST = (CONF_XHTTP_DOWN_HOST or os.environ.get("XHTTP_DOWN_HOST", "")).strip()
 
     REALITY_PORT = (CONF_REALITY_PORT or os.environ.get("REALITY_PORT", "")).strip()
     SS_PORT = (CONF_SS_PORT or os.environ.get("SS_PORT", "")).strip()
@@ -521,7 +533,7 @@ def main():
     # 2. 准备二进制核心
     xray_bin = prepare_xray_core()
 
-    # 3. 异步探测公网 IP 与地理位置 (0 阻塞)
+    # 3. 异步探测公网 IP 与地理位置
     geo_country = "DEFAULT"
     PUBLIC_IP = (CONF_IP or os.environ.get("PUBLIC_IP") or os.environ.get("IP", "")).strip()
     NODE_NAME = (CONF_NAME or os.environ.get("NAME", "")).strip()
@@ -529,15 +541,24 @@ def main():
     def probe_geo():
         nonlocal PUBLIC_IP, geo_country, NODE_NAME
         try:
-            if not PUBLIC_IP:
-                PUBLIC_IP = http_get("https://ipinfo.io/ip") or http_get("https://ifconfig.co/ip")
-            c = http_get("https://ipinfo.io/country")
-            if c:
-                geo_country = c.strip().upper()
-            org = http_get("https://ipinfo.io/org")
-            if not NODE_NAME:
-                clean_org = re.sub(r"[^a-zA-Z0-9]", "", org) if org else ""
-                NODE_NAME = f"{geo_country}-{clean_org}" if geo_country and clean_org else (geo_country or "xray")
+            data_str = http_get("https://ipinfo.io/json")
+            if data_str:
+                data = json.loads(data_str)
+                if not PUBLIC_IP:
+                    PUBLIC_IP = (data.get("ip") or "").strip()
+                c = (data.get("country") or "").strip().upper()
+                if c:
+                    geo_country = c
+                org = (data.get("org") or "").strip()
+                if not NODE_NAME:
+                    clean_org = re.sub(r"[^a-zA-Z0-9]", "", org) if org else ""
+                    NODE_NAME = f"{geo_country}-{clean_org}" if geo_country and clean_org else (geo_country or "xray")
+            else:
+                if not PUBLIC_IP:
+                    PUBLIC_IP = http_get("https://ifconfig.co/ip") or http_get("https://api.ipify.org")
+                c = http_get("https://ipinfo.io/country")
+                if c:
+                    geo_country = c.strip().upper()
         except Exception:
             pass
         if not NODE_NAME:
@@ -545,6 +566,7 @@ def main():
 
     geo_thread = threading.Thread(target=probe_geo, daemon=True)
     geo_thread.start()
+    geo_thread.join(timeout=3.0)  # 等待地理探测与 IP 解析完成，确保 Reality 伪装域名匹配实际地理区域
 
     # 4. 构建 Xray 配置
     inbounds = []
@@ -593,7 +615,6 @@ def main():
         priv_k, pub_k = get_reality_keys(xray_bin)
         if priv_k and pub_k:
             reality_pub_key = pub_k
-            geo_thread.join(timeout=2.0)
             reality_domain = resolve_reality_domain(geo_country, CONF_REALITY_DOMAIN or os.environ.get("REALITY_DOMAIN", ""))
             logger.info(f"[Reality] 启用 VLESS-Reality (Vision)，端口 {REALITY_PORT}，伪装站点: {reality_domain}")
             inbounds.append({
@@ -603,7 +624,8 @@ def main():
                 "protocol": "vless",
                 "settings": {
                     "clients": [{"id": UUID, "flow": "xtls-rprx-vision"}],
-                    "decryption": "none"
+                    "decryption": "none",
+                    "fallbacks": [{"dest": V_XHTTP_PORT, "xver": 0}]
                 },
                 "streamSettings": {
                     "network": "tcp",
@@ -680,12 +702,72 @@ def main():
     current_argo_host = [ARGO_DOMAIN or "your-domain.com"]
 
     def build_subscription(prefer_h: str, cur_h: str):
-        geo_thread.join(timeout=1.0)
         name = NODE_NAME or "xray"
         fmt_ip = f"[{PUBLIC_IP}]" if ":" in PUBLIC_IP else PUBLIC_IP
         links = []
+
+        xh_extra_param = ""
+        if XHTTP_DOWN_MODE == "reality" and REALITY_PORT and reality_pub_key and fmt_ip:
+            rx_addr = fmt_ip.strip("[]")
+            extra_obj = {
+                "xmux": {
+                    "maxConcurrency": "16-32",
+                    "maxConnections": 0,
+                    "cMaxReuseTimes": 0,
+                    "hMaxRequestTimes": "600-900",
+                    "hMaxReusableSecs": "1800-3000"
+                },
+                "downloadSettings": {
+                    "address": rx_addr,
+                    "port": int(REALITY_PORT),
+                    "network": "xhttp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "serverName": reality_domain,
+                        "fingerprint": "chrome",
+                        "show": False,
+                        "publicKey": reality_pub_key,
+                        "shortId": "",
+                        "spiderX": ""
+                    },
+                    "xhttpSettings": {
+                        "path": XHTTP_PATH_VLESS,
+                        "mode": "auto"
+                    }
+                }
+            }
+            xh_extra_param = f"&extra={urllib.parse.quote(json.dumps(extra_obj))}"
+        elif XHTTP_DOWN_MODE == "cdn" and XHTTP_DOWN_DOMAIN:
+            down_host = XHTTP_DOWN_HOST or XHTTP_DOWN_DOMAIN
+            extra_obj = {
+                "xmux": {
+                    "maxConcurrency": "16-32",
+                    "maxConnections": 0,
+                    "cMaxReuseTimes": 0,
+                    "hMaxRequestTimes": "600-900",
+                    "hMaxReusableSecs": "1800-3000"
+                },
+                "downloadSettings": {
+                    "address": down_host,
+                    "port": 443,
+                    "network": "xhttp",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "serverName": XHTTP_DOWN_DOMAIN,
+                        "alpn": ["h2", "http/1.1"],
+                        "fingerprint": "chrome"
+                    },
+                    "xhttpSettings": {
+                        "path": XHTTP_PATH_VLESS,
+                        "host": XHTTP_DOWN_DOMAIN,
+                        "mode": "auto"
+                    }
+                }
+            }
+            xh_extra_param = f"&extra={urllib.parse.quote(json.dumps(extra_obj))}"
+
         if not DISABLE_ARGO:
-            links.append(f"vless://{UUID}@{prefer_h}:443?encryption=none&security=tls&type=xhttp&host={cur_h}&path={urllib.parse.quote(XHTTP_PATH_VLESS)}&mode=packet-up&sni={cur_h}#{urllib.parse.quote(name + '-VLESS-xhttp')}")
+            links.append(f"vless://{UUID}@{prefer_h}:443?encryption=none&security=tls&type=xhttp&host={cur_h}&path={urllib.parse.quote(XHTTP_PATH_VLESS)}&mode=packet-up&sni={cur_h}{xh_extra_param}#{urllib.parse.quote(name + '-VLESS-xhttp')}")
             links.append(f"vless://{UUID}@{prefer_h}:443?encryption=none&security=tls&type=ws&host={cur_h}&path={urllib.parse.quote(WS_PATH_VLESS)}&sni={cur_h}#{urllib.parse.quote(name + '-VLESS-WS')}")
             vmess_d = {
                 "v": "2", "ps": f"{name}-VMess-WS", "add": prefer_h, "port": "443",
@@ -715,38 +797,42 @@ def main():
             pass
         return links, b64
 
-    # 内部分流 HTTP / WS Server
+    # 内部分流 HTTP / WS Server (多路复用网关)
     class MultiProxyHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
         def do_GET(self):
             self.route_request()
 
         def do_POST(self):
             self.route_request()
 
+        def do_HEAD(self):
+            self.route_request()
+
+        def do_OPTIONS(self):
+            self.route_request()
+
         def route_request(self):
             parsed = urllib.parse.urlparse(self.path)
+
             # A. xhttp (SplitHTTP) 流反代
             if parsed.path == XHTTP_PATH_VLESS or parsed.path.startswith(XHTTP_PATH_VLESS + "/"):
-                try:
-                    conn = http.client.HTTPConnection("127.0.0.1", V_XHTTP_PORT, timeout=60)
-                    body = None
-                    cl = self.headers.get("Content-Length")
-                    if cl and cl.isdigit():
-                        body = self.rfile.read(int(cl))
-                    h_dict = {k: v for k, v in self.headers.items()}
-                    conn.request(self.command, self.path, body=body, headers=h_dict)
-                    res = conn.getresponse()
-                    self.send_response(res.status)
-                    for hk, hv in res.getheaders():
-                        self.send_header(hk, hv)
-                    self.end_headers()
-                    shutil.copyfileobj(res, self.wfile)
-                except Exception as e:
-                    self.send_error(502, f"Bad Gateway: {e}")
+                self.proxy_stream(V_XHTTP_PORT)
                 return
 
             # B. 订阅接口
             if parsed.path.strip("/") == SUB_PATH:
+                if SUB_TOKEN:
+                    query_params = urllib.parse.parse_qs(parsed.query)
+                    token_val = query_params.get("token", [""])[0]
+                    if not hmac.compare_digest(token_val, SUB_TOKEN):
+                        self.send_response(403)
+                        self.send_header("Content-Type", "text/plain; charset=utf-8")
+                        self.end_headers()
+                        self.wfile.write(b"Forbidden: Invalid Subscription Token")
+                        return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache, no-store")
@@ -782,7 +868,7 @@ def main():
                     elif p == WS_PATH_TROJAN:
                         target_port = V_TROJAN_PORT
                     if target_port:
-                        self.proxy_websocket(target_port)
+                        self.proxy_stream(target_port)
                         return
 
                 mname = 'do_' + self.command
@@ -795,23 +881,40 @@ def main():
             except (socket.timeout, ConnectionResetError, BrokenPipeError):
                 self.close_connection = True
 
-        def proxy_websocket(self, port: int):
+        def proxy_stream(self, port: int):
+            target_sock = None
             try:
                 target_sock = socket.create_connection(("127.0.0.1", port), timeout=10)
                 client_sock = self.connection
 
-                # 发送重组的 HTTP 请求头至内部端口
-                req_lines = [self.raw_requestline.decode("utf-8", errors="ignore")]
-                for k, v in self.headers.items():
-                    req_lines.append(f"{k}: {v}\r\n")
-                req_lines.append("\r\n")
-                target_sock.sendall("".join(req_lines).encode("utf-8"))
+                # 发送重组的 HTTP 请求行与请求头至内部端口
+                target_sock.sendall(self.raw_requestline)
+                req_headers = [f"{k}: {v}\r\n".encode("utf-8") for k, v in self.headers.items()]
+                req_headers.append(b"\r\n")
+                target_sock.sendall(b"".join(req_headers))
+
+                # 提取 self.rfile 中已被缓冲读取的 Early-Data 数据，避免连接截断与数据丢失
+                client_sock.setblocking(False)
+                buf_list = []
+                try:
+                    while True:
+                        chunk = self.rfile.read1(65536)
+                        if not chunk:
+                            break
+                        buf_list.append(chunk)
+                except (BlockingIOError, socket.error):
+                    pass
+                finally:
+                    client_sock.setblocking(True)
+
+                if buf_list:
+                    target_sock.sendall(b"".join(buf_list))
 
                 # 双向全双工转发
                 sockets = [client_sock, target_sock]
                 while not is_shutting_down:
-                    r, _, _ = select.select(sockets, [], sockets, 30.0)
-                    if not r:
+                    r, _, x = select.select(sockets, [], sockets, 60.0)
+                    if x or not r:
                         break
                     for s in r:
                         other = target_sock if s is client_sock else client_sock
@@ -822,18 +925,24 @@ def main():
             except Exception:
                 pass
             finally:
+                if target_sock:
+                    try:
+                        target_sock.close()
+                    except Exception:
+                        pass
                 self.close_connection = True
 
+    class ThreadedTCPServer(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
     if not DISABLE_ARGO:
-        class ThreadedTCPServer(http.server.ThreadingHTTPServer):
-            daemon_threads = True
-            allow_reuse_address = True
-
-        argo_server = ThreadedTCPServer(("127.0.0.1", ARGO_PORT), MultiProxyHandler)
+        argo_listen_host = "0.0.0.0" if XHTTP_DOWN_MODE == "cdn" else "127.0.0.1"
+        argo_server = ThreadedTCPServer((argo_listen_host, ARGO_PORT), MultiProxyHandler)
         threading.Thread(target=argo_server.serve_forever, daemon=True).start()
-        logger.info(f"[Argo] 多协议单端口分流引擎运行于 127.0.0.1:{ARGO_PORT}")
+        logger.info(f"[Argo] 多协议单端口分流引擎运行于 {argo_listen_host}:{ARGO_PORT}")
 
-    main_server = http.server.ThreadingHTTPServer(("0.0.0.0", INBOUND_PORT), MultiProxyHandler)
+    main_server = ThreadedTCPServer(("0.0.0.0", INBOUND_PORT), MultiProxyHandler)
     threading.Thread(target=main_server.serve_forever, daemon=True).start()
     logger.info(f"[HTTP] Web 伪装站与订阅服务运行于 http://0.0.0.0:{INBOUND_PORT}")
 
@@ -845,12 +954,15 @@ def main():
         chat_id = (CONF_TG_CHAT_ID or os.environ.get("TG_CHAT_ID", "")).strip()
         if not token or not chat_id:
             return
+        sub_token_query = f"?token={urllib.parse.quote(SUB_TOKEN)}" if SUB_TOKEN else ""
         text = (
             f"🎉 *Xray 节点部署成功通知 (Python)*\n"
             f"*节点*: `{NODE_NAME}`\n"
-            f"*域名*: `{h}`\n"
-            f"*订阅*: `http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}`"
         )
+        if not DISABLE_ARGO and h:
+            text += f"*域名*: `{h}`\n"
+        text += f"*订阅*: `http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}`"
+
         payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode("utf-8")
         try:
             req = urllib.request.Request(
@@ -866,11 +978,12 @@ def main():
         current_argo_host[0] = h
         cur_links, _ = build_subscription(prefer_host, h)
         if (CONF_SHOW_LOG or os.environ.get("SHOW_LOG", "true")).lower() != "false":
+            sub_token_query = f"?token={urllib.parse.quote(SUB_TOKEN)}" if SUB_TOKEN else ""
             print("\n============================================================")
             print("🚀 Xray 多功能综合穿透代理服务已就绪 (Python)")
             print(f"📌 节点标识: {NODE_NAME} (地区: {geo_country})")
-            print(f"🔗 外部订阅: http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}")
-            if not DISABLE_ARGO:
+            print(f"🔗 外部订阅: http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}")
+            if not DISABLE_ARGO and h:
                 print(f"🛡️ Argo 域名: {h}")
             print("---------------- 节点订阅明细 ----------------")
             for lk in cur_links:
@@ -933,6 +1046,9 @@ def main():
                     proc.wait()
                     time.sleep(3.0)
             threading.Thread(target=quick_runner, daemon=True).start()
+    else:
+        logger.info("[Argo] 隧道已被禁用 (DISABLE_ARGO=true)，仅运行直连与本地分流服务")
+        on_ready("")
 
     # 7. 启动 Komari
     if KOMARI_DOMAIN and KOMARI_TOKEN:
