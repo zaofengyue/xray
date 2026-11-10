@@ -851,7 +851,9 @@ prompt_port() {
       continue
     fi
     if is_reserved_port "$res"; then
-      warn "端口 $res 为脚本内部保留端口 (8001, 10000-10003, 10808)，请换用其他端口"
+      local ap_disp
+      ap_disp="$(get_val ARGO_PORT "8001")"
+      warn "端口 $res 为脚本内部保留端口 (${ap_disp}, 10000-10003, 10808)，请换用其他端口"
       continue
     fi
     if [ -n "$exclude_ports" ] && [[ " $exclude_ports " =~ " $res " ]]; then
@@ -913,7 +915,8 @@ prompt_remote_port() {
 
 prompt_relay_port() {
   local prompt_text="$1" default_val="${2:-10808}"
-  local res
+  local res ap
+  ap="$(get_val ARGO_PORT "8001")"
   while true; do
     read -p "$prompt_text" res
     res="${res:-$default_val}"
@@ -922,8 +925,8 @@ prompt_relay_port() {
       continue
     fi
     case "$res" in
-      8001|10000|10001|10002|10003)
-        warn "端口 $res 为内部分流端口 (8001, 10000-10003)，不可用作转接监听"
+      "$ap"|10000|10001|10002|10003)
+        warn "端口 $res 为内部分流端口 (${ap}, 10000-10003)，不可用作转接监听"
         continue
         ;;
     esac
@@ -2317,6 +2320,7 @@ EOF
     w_priv="$(grep '^PRIV_KEY=' "$WARP_CONF" | cut -d'=' -f2-)"
     w_peer="$(grep '^PEER_PUB_KEY=' "$WARP_CONF" | cut -d'=' -f2-)"
     if ! is_valid_wg_key "$w_priv" || ! is_valid_wg_key "$w_peer"; then
+      rm -f "$tmp_cfg"
       warn "WARP 凭据密钥格式无效，无法生成出站配置，正在自动回滚..."
       return 1
     fi
