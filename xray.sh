@@ -581,11 +581,11 @@ download_turn2socks() {
   case "$(uname -m)" in
     x86_64|amd64)
       t2s_arch="amd64"
-      exp_t2s_sha="a880097b3ef60f1f32ad5850effee76e419a879e0769ec49ba20254bfceee94e"
+      exp_t2s_sha="a0a5e5b8d9665ecada32d43ac34d07d88687ccb84b8e2fe04fa5269ded3be192"
       ;;
     aarch64|arm64)
       t2s_arch="arm64"
-      exp_t2s_sha="e1301b34d9b08bf932962febd20faa58bb7f9c63e04dbb296f394337927856c4"
+      exp_t2s_sha="d636bf8aeb11607d8cd0db56da0ced00ed622ab9ab3c29bfdf20ac75d8755643"
       ;;
     *)
       warn "turn2socks 仅提供 amd64 / arm64 构建，当前架构 $(uname -m) 不受支持"
@@ -802,22 +802,41 @@ port_in_use_os() {
       fi
       return 0
     fi
+  else
+    local hex_p
+    hex_p="$(printf '%04X' "$p" 2>/dev/null)"
+    if [ -n "$hex_p" ]; then
+      if grep -qi ":${hex_p} [0-9A-F:]* 0A" /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+        return 0
+      fi
+      if grep -qi ":${hex_p} " /proc/net/udp /proc/net/udp6 2>/dev/null; then
+        return 0
+      fi
+    fi
   fi
   return 1
 }
 
 is_reserved_port() {
+  local ap
+  ap="$(get_val ARGO_PORT "8001")"
   case "$1" in
-    8001|10000|10001|10002|10003|10808) return 0 ;;
+    "$ap"|10000|10001|10002|10003|10808) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+is_valid_port() {
+  local p="$1"
+  [ -z "$p" ] && return 1
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$p" -ge 1 ] && [ "$p" -le 65535 ]
 }
 
 is_valid_port_or_empty() {
   local p="$1"
   [ -z "$p" ] && return 0
-  case "$p" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$p" -ge 1 ] && [ "$p" -le 65535 ]
+  is_valid_port "$p"
 }
 
 prompt_port() {
@@ -835,6 +854,35 @@ prompt_port() {
       warn "端口 $res 为脚本内部保留端口 (8001, 10000-10003, 10808)，请换用其他端口"
       continue
     fi
+    if [ -n "$exclude_ports" ] && [[ " $exclude_ports " =~ " $res " ]]; then
+      warn "端口 $res 已被其他协议入站选用，请勿重复使用"
+      continue
+    fi
+    if port_in_use_os "$res"; then
+      warn "端口 $res 已被系统其他进程占用，请换用其他端口"
+      continue
+    fi
+    echo "$res"
+    return 0
+  done
+}
+
+prompt_argo_port() {
+  local prompt_text="$1" default_val="${2:-8001}" exclude_ports="${3:-}"
+  local res
+  while true; do
+    read -p "$prompt_text" res
+    res="${res:-$default_val}"
+    if ! is_valid_port "$res"; then
+      warn "端口格式错误，必须为 1-65535 的数字"
+      continue
+    fi
+    case "$res" in
+      10000|10001|10002|10003|10808)
+        warn "端口 $res 为脚本内部调度保留端口 (10000-10003, 10808)，请换用其他端口"
+        continue
+        ;;
+    esac
     if [ -n "$exclude_ports" ] && [[ " $exclude_ports " =~ " $res " ]]; then
       warn "端口 $res 已被其他协议入站选用，请勿重复使用"
       continue
@@ -1049,7 +1097,9 @@ get_env_ports() {
   [ -n "$sp" ] && echo "$sp/both"
   [ -n "$s5" ] && echo "$s5/both"
   [ -n "$tp" ] && echo "$tp/tcp"
-  [ "$cdn_m" = "cdn" ] && echo "8001/tcp"
+  local ap
+  ap="$(get_val_from "$target_env" ARGO_PORT "8001")"
+  [ "$cdn_m" = "cdn" ] && [ -n "$ap" ] && echo "$ap/tcp"
 }
 
 # 比较旧 env 和新 env，差异化调整防火墙规则 (仅在配置确定保存并应用时调用)
@@ -1665,7 +1715,17 @@ setup_warp_outbound() {
     read -p "请选择 [默认 1]: " warp_opt
     warp_opt="${warp_opt:-1}"
     case "$warp_opt" in
-      1) need_reg=0 ;;
+      1)
+        local old_priv old_peer
+        old_priv="$(grep '^PRIV_KEY=' "$WARP_CONF" 2>/dev/null | cut -d'=' -f2-)"
+        old_peer="$(grep '^PEER_PUB_KEY=' "$WARP_CONF" 2>/dev/null | cut -d'=' -f2-)"
+        if ! is_valid_wg_key "$old_priv" || ! is_valid_wg_key "$old_peer"; then
+          warn "已保存的 WARP 密钥格式无效（旧版兼容遗留），请选择 2 重新注册！"
+          press_any_key
+          return 1
+        fi
+        need_reg=0
+        ;;
       2) need_reg=1 ;;
       *) return ;;
     esac
@@ -1988,7 +2048,8 @@ EOF
 
   # 1. Argo 穿透入站组
   if [ "$(get_val DISABLE_ARGO)" != "true" ]; then
-    local argo_listen="127.0.0.1"
+    local argo_port argo_listen="127.0.0.1"
+    argo_port="$(get_val ARGO_PORT "8001")"
     [ "$(get_val XHTTP_DOWN_MODE)" = "cdn" ] && argo_listen="$listen_addr"
     local argo_fallbacks='          {
             "path": "/vmess-ws",
@@ -2012,7 +2073,7 @@ EOF
 
     append_inbound '    {
       "tag": "argo-dispatcher-in",
-      "port": 8001,
+      "port": '"$argo_port"',
       "listen": "'"$argo_listen"'",
       "protocol": "vless",
       "settings": {
@@ -2034,7 +2095,7 @@ EOF
     if [ "$argo_listen" = "127.0.0.1" ] && grep -q '^00000000000000000000000000000001 ' /proc/net/if_inet6 2>/dev/null; then
       append_inbound '    {
       "tag": "argo-dispatcher-v6-in",
-      "port": 8001,
+      "port": '"$argo_port"',
       "listen": "::1",
       "protocol": "vless",
       "settings": {
@@ -2252,33 +2313,37 @@ EOF
   }
 
   if [ "$out_type" = "warp" ] && [ -f "$WARP_CONF" ]; then
-    active_outbound_tag="warp-out"
     local w_priv w_peer w_v4 w_v6 w_res w_end
     w_priv="$(grep '^PRIV_KEY=' "$WARP_CONF" | cut -d'=' -f2-)"
     w_peer="$(grep '^PEER_PUB_KEY=' "$WARP_CONF" | cut -d'=' -f2-)"
-    w_v4="$(grep '^IPV4=' "$WARP_CONF" | cut -d'=' -f2-)"
-    w_v6="$(grep '^IPV6=' "$WARP_CONF" | cut -d'=' -f2-)"
-    w_res="$(grep '^RESERVED=' "$WARP_CONF" | cut -d'=' -f2-)"
-    w_end="$(grep '^ENDPOINT=' "$WARP_CONF" | cut -d'=' -f2-)"
+    if ! is_valid_wg_key "$w_priv" || ! is_valid_wg_key "$w_peer"; then
+      warn "WARP 凭据密钥格式无效，无法生成出站配置，正在自动回滚..."
+      return 1
+    fi
+    active_outbound_tag="warp-out"
+      w_v4="$(grep '^IPV4=' "$WARP_CONF" | cut -d'=' -f2-)"
+      w_v6="$(grep '^IPV6=' "$WARP_CONF" | cut -d'=' -f2-)"
+      w_res="$(grep '^RESERVED=' "$WARP_CONF" | cut -d'=' -f2-)"
+      w_end="$(grep '^ENDPOINT=' "$WARP_CONF" | cut -d'=' -f2-)"
 
-    local addr_arr="\"${w_v4}/32\""
-    [ -n "$w_v6" ] && addr_arr="\"${w_v4}/32\", \"${w_v6}/128\""
+      local addr_arr="\"${w_v4}/32\""
+      [ -n "$w_v6" ] && addr_arr="\"${w_v4}/32\", \"${w_v6}/128\""
 
-    local warp_block='    {
-      "tag": "warp-out",
-      "protocol": "wireguard",
-      "settings": {
-        "secretKey": "'"$w_priv"'",
-        "address": ['"$addr_arr"'],
-        "peers": [{
-          "publicKey": "'"$w_peer"'",
-          "endpoint": "'"$w_end"'"
-        }],
-        "reserved": ['"$w_res"'],
-        "mtu": 1280,
-        "noKernelTun": true
-      }
-    }'
+      local warp_block='    {
+        "tag": "warp-out",
+        "protocol": "wireguard",
+        "settings": {
+          "secretKey": "'"$w_priv"'",
+          "address": ['"$addr_arr"'],
+          "peers": [{
+            "publicKey": "'"$w_peer"'",
+            "endpoint": "'"$w_end"'"
+          }],
+          "reserved": ['"$w_res"'],
+          "mtu": 1280,
+          "noKernelTun": true
+        }
+      }'
 
     if [ "$out_route_mode" = "global" ]; then
       append_outbound "$warp_block"
@@ -2805,7 +2870,9 @@ start_cloudflared() {
   else
     set_val ARGO_DOMAIN ""
     > "$CF_LOG" 2>/dev/null || true
-    cf_args+=("--url" "http://127.0.0.1:8001")
+    local argo_port
+    argo_port="$(get_val ARGO_PORT "8001")"
+    cf_args+=("--url" "http://127.0.0.1:${argo_port}")
     "$CF_BIN" "${cf_args[@]}" >> "$CF_LOG" 2>&1 &
     echo $! > "$CF_PID"
     log "Cloudflare 临时隧道正在建立连接..."
@@ -3235,7 +3302,7 @@ do_install() {
     *) inst_mode=1 ;;
   esac
 
-  local in_uuid in_name in_disable_argo in_argo_domain in_argo_auth in_pref_host
+  local in_uuid in_name in_disable_argo in_argo_domain in_argo_auth in_argo_port="" in_pref_host
   local in_reality_port in_xhttp_port in_reality_domain in_ss_port in_ss_pass in_s5_port in_s5_user in_s5_pass in_trojan_port
 
   in_uuid="$(get_uuid)"
@@ -3252,6 +3319,7 @@ do_install() {
     in_disable_argo="false"
     in_argo_domain=""
     in_argo_auth=""
+    in_argo_port="8001"
     in_reality_domain="www.iij.ad.jp"
     in_pref_host="www.visa.com.tw"
     in_ss_pass="$(get_ss2022_key "")"
@@ -3282,7 +3350,10 @@ do_install() {
         if [ -n "$in_argo_domain" ]; then
           read_token "Argo Tunnel Token: " in_argo_auth
           if [ -z "$in_argo_auth" ]; then
+            warn "未填入 Token，已自动切换为临时隧道"
             in_argo_domain=""
+          else
+            in_argo_port="$(prompt_argo_port "Argo 内部聚合端口 [默认 8001]: " "8001" "")"
           fi
         fi
         read -p "Cloudflare 优选域名/IP [默认 www.visa.com.tw]: " in_pref_host
@@ -3298,7 +3369,7 @@ do_install() {
     rec_xh="$(get_random_high_port)"
     rec_ss="$(get_random_high_port)"
 
-    local chosen_ports=""
+    local chosen_ports="${in_argo_port:-8001}"
     in_reality_port="$(prompt_port "Reality TCP 端口 [默认推荐高位 ${rec_r}，填 0 关闭]: " "$rec_r" "$chosen_ports")"
     [ -n "$in_reality_port" ] && chosen_ports="$chosen_ports $in_reality_port"
 
@@ -3349,6 +3420,7 @@ do_install() {
   set_val DISABLE_ARGO "${in_disable_argo:-false}"
   set_val ARGO_DOMAIN "${in_argo_domain:-}"
   set_val ARGO_AUTH "${in_argo_auth:-}"
+  set_val ARGO_PORT "${in_argo_port:-8001}"
   set_val CF_PREFER_HOST "${in_pref_host:-www.visa.com.tw}"
 
   set_val REALITY_PORT "${in_reality_port:-}"
@@ -3742,7 +3814,8 @@ menu_config() {
             fi
             ;;
           2)
-            local in_ad in_at
+            local in_ad in_at in_ap cur_ap
+            cur_ap="$(get_val ARGO_PORT "8001")"
             read -r -e -p "Argo 域名 [回车取消]: " in_ad
             in_ad="$(normalize_host "$in_ad")"
             if [ -z "$in_ad" ]; then
@@ -3756,11 +3829,14 @@ menu_config() {
               sleep 0.5
               continue
             fi
+            local cur_other_p="$cur_rp $cur_xp $cur_sp $cur_s5 $cur_tp"
+            in_ap="$(prompt_argo_port "Argo 内部聚合端口 [当前 ${cur_ap}]: " "$cur_ap" "$cur_other_p")"
+            set_val ARGO_PORT "$in_ap"
             set_val DISABLE_ARGO "false"
             set_val ARGO_DOMAIN "$in_ad"
             set_val ARGO_AUTH "$in_at"
             config_modified=1
-            log "已配置固定隧道"
+            log "已配置固定隧道 (CF 面板服务地址请指向 http://127.0.0.1:${in_ap})"
             sleep 0.5
             ;;
           3)
@@ -3791,11 +3867,11 @@ menu_config() {
           log "CDN 优选地址已更新"
         fi
 
-        echo -e "\n${GREEN}--- xhttp 上下行分离设置 (进阶功能) ---${RESET}"
+        echo -e "\n${GREEN}--- xhttp 上下行分离设置 ---${RESET}"
         echo -e "说明: xhttp 允许上行与下行走不同线路。当前默认同源走 Cloudflare CDN。"
-        echo -e "${WHITE} 1. 默认同源 (上下行均走 Cloudflare CDN)${RESET}"
-        echo -e "${WHITE} 2. 下行复用本机 Reality-xhttp (推荐: 规避上行阻断且下行直连高速)${RESET}"
-        echo -e "${WHITE} 3. 下行自定义 CDN (如 AWS CloudFront 等)${RESET}"
+        echo -e "${WHITE} 1. 默认同源${RESET}"
+        echo -e "${WHITE} 2. 下行复用本机 Reality-xhttp${RESET}"
+        echo -e "${WHITE} 3. 下行自定义 CDN${RESET}"
         echo -e "${WHITE} 0. 保持不变${RESET}"
         read -p "请选择下行策略 [0-3, 默认 0]: " xh_down_opt
         case "$xh_down_opt" in
@@ -3820,7 +3896,7 @@ menu_config() {
             fi
             ;;
           3)
-            read -p "请输入下行 CDN 域名 (如 d123.cloudfront.net): " in_down_dom
+            read -p "请输入下行 CDN 域名: " in_down_dom
             in_down_dom="$(printf '%s' "$in_down_dom" | tr -d '[:space:]')"
             if [ -n "$in_down_dom" ]; then
               if ! validate_domain_name "$in_down_dom"; then
@@ -3834,7 +3910,6 @@ menu_config() {
                 set_val XHTTP_DOWN_HOST "$in_down_host"
                 config_modified=1
                 log "已配置 xhttp 下行自定义 CDN: ${in_down_dom}"
-                echo -e "${YELLOW}提示: 请将 ${in_down_dom} 的回源指向本机 HTTP 8001 端口 (或已启用证书的 Trojan 端口)${RESET}"
               fi
             fi
             ;;
@@ -4096,7 +4171,7 @@ do_uninstall() {
 }
 
 # ── 22. 命令行与快捷指令入口分发 ───────────────────────────────────────────────
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then
   setup_shortcuts
 
   case "${1:-}" in
