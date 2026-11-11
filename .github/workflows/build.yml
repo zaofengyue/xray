@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'nodejs/**'
+      - 'python/**'
       - 'turn2socks/**'
       - 'Dockerfile'
       - '.dockerignore'
@@ -28,6 +29,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Syntax & Compile Check
+        run: |
+          node --check nodejs/index.js
+          python3 -m py_compile python/app.py
 
       - name: Install obfuscator
         run: npm install -g javascript-obfuscator
