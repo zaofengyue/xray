@@ -90,7 +90,7 @@ def untrack_subprocess(proc):
         pass
 
 def graceful_exit(signum=None, frame=None):
-    global is_shutting_down, EXIT_CODE
+    global is_shutting_down
     if is_shutting_down:
         sys.exit(EXIT_CODE)
     is_shutting_down = True
@@ -175,6 +175,27 @@ SUB_FILE = CORE_DIR / "sub.txt"
 PID_FILE = CORE_DIR / ".pids"
 pid_lock = threading.Lock()
 
+def secure_permissions(p: Path):
+    if platform.system().lower() != "windows":
+        try:
+            os.chmod(p, 0o600)
+        except Exception:
+            pass
+
+def secure_write_text(p: Path, content: str):
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if platform.system().lower() != "windows":
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            fd = os.open(p, flags, 0o600)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            p.write_text(content, encoding="utf-8")
+    except Exception:
+        p.write_text(content, encoding="utf-8")
+        secure_permissions(p)
+
 def record_pid(pid: int):
     with pid_lock:
         try:
@@ -183,8 +204,7 @@ def record_pid(pid: int):
                 pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip()]
             if str(pid) not in pids:
                 pids.append(str(pid))
-                PID_FILE.write_text("\n".join(pids), encoding="utf-8")
-                secure_permissions(PID_FILE)
+                secure_write_text(PID_FILE, "\n".join(pids))
         except Exception:
             pass
 
@@ -193,8 +213,7 @@ def remove_pid(pid: int):
         try:
             if PID_FILE.exists():
                 pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and p.strip() != str(pid)]
-                PID_FILE.write_text("\n".join(pids), encoding="utf-8")
-                secure_permissions(PID_FILE)
+                secure_write_text(PID_FILE, "\n".join(pids))
         except Exception:
             pass
 
@@ -218,9 +237,16 @@ def validate_ip(raw: str) -> str:
         ipaddress.ip_address(cand)
         return cand
     except Exception:
-        pass
-    # 允许合规的域名/DDNS 主机名 (总长 <= 253, 标签 1-63 字符且符合 RFC 1123, 至少包含一个点)
-    if len(cand) <= 253 and re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$", cand):
+        return ""
+
+def validate_host(raw: str) -> str:
+    if not raw or not isinstance(raw, str):
+        return ""
+    cand = raw.strip().strip("[]")
+    if validate_ip(cand):
+        return cand
+    # 允许合规的域名/DDNS 主机名 (总长 <= 253, 标签 1-63 字符且符合 RFC 1123, 最后一个标签 TLD 必须包含字母，杜绝全数字伪 IP)
+    if len(cand) <= 253 and re.match(r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*$", cand):
         return cand
     return ""
 
@@ -301,13 +327,6 @@ def get_safe_env(extra: dict = None) -> dict:
 # ──────────────────────────────────────────────
 # 工具函数
 # ──────────────────────────────────────────────
-def secure_permissions(p: Path):
-    if platform.system().lower() != "windows":
-        try:
-            os.chmod(p, 0o600)
-        except Exception:
-            pass
-
 def make_executable(p: Path):
     if platform.system().lower() != "windows":
         try:
@@ -334,8 +353,7 @@ def get_or_generate_uuid() -> str:
             pass
     gen = str(uuid.uuid4())
     try:
-        UUID_FILE.write_text(gen, encoding="utf-8")
-        secure_permissions(UUID_FILE)
+        secure_write_text(UUID_FILE, gen)
     except Exception:
         pass
     return gen
@@ -353,8 +371,7 @@ def get_or_generate_sub_token(preset_token: str) -> str:
             pass
     gen = os.urandom(16).hex()
     try:
-        SUB_TOKEN_FILE.write_text(gen, encoding="utf-8")
-        secure_permissions(SUB_TOKEN_FILE)
+        secure_write_text(SUB_TOKEN_FILE, gen)
     except Exception:
         pass
     return gen
@@ -378,8 +395,7 @@ def get_or_generate_ss_pass(preset_pass: str) -> str:
             pass
     gen = base64.b64encode(os.urandom(16)).decode("utf-8")
     try:
-        SS_PASS_FILE.write_text(gen, encoding="utf-8")
-        secure_permissions(SS_PASS_FILE)
+        secure_write_text(SS_PASS_FILE, gen)
     except Exception:
         pass
     return gen
@@ -399,8 +415,7 @@ def get_or_generate_s5_creds(preset_user: str, preset_pass: str) -> tuple:
     u = u or ("u" + os.urandom(4).hex())
     p = p or base64.urlsafe_b64encode(os.urandom(12)).decode("utf-8").rstrip("=")
     try:
-        S5_CREDS_FILE.write_text(json.dumps({"user": u, "pass": p}, indent=2), encoding="utf-8")
-        secure_permissions(S5_CREDS_FILE)
+        secure_write_text(S5_CREDS_FILE, json.dumps({"user": u, "pass": p}, indent=2))
     except Exception:
         pass
     return u, p
@@ -558,7 +573,11 @@ def prepare_xray_core() -> Path:
                 raise RuntimeError(f"Xray 核心包 SHA256 校验不匹配! 预期: {expected_sha256}, 实际: {actual_hash}")
             logger.info(f"[Xray] 核心包 SHA256 校验通过 ({expected_sha256[:16]}...)")
         else:
-            logger.warning("[Xray] 未能获取有效 SHA256 校验和，已跳过哈希核验")
+            allow_unverified = os.environ.get("ALLOW_UNVERIFIED_BIN", "").lower() in ("true", "1")
+            if allow_unverified:
+                logger.warning("[Xray] 未能获取有效 SHA256 校验和，因 ALLOW_UNVERIFIED_BIN=true 降级跳过哈希核验")
+            else:
+                raise RuntimeError("[安全错误] 未能获取 Xray 的有效 SHA256 校验和 (.dgst)，已中止执行！如需强制跳过校验，请设置环境变量 ALLOW_UNVERIFIED_BIN=true")
 
         with zipfile.ZipFile(tmp_zip) as z:
             z.extractall(CORE_DIR / ".xray_tmp")
@@ -721,8 +740,7 @@ def get_reality_keys(xray_bin: Path):
             m_pub  = re.search(r"(?:Password\s*\(PublicKey\)|Public\s*key|PublicKey|Password)\s*:\s*(\S+)", out, re.I)
             if m_priv and m_pub:
                 priv, pub = m_priv.group(1), m_pub.group(1)
-                REALITY_KEY_FILE.write_text(json.dumps({"privKey": priv, "pubKey": pub, "shortId": short_id}, indent=2), encoding="utf-8")
-                secure_permissions(REALITY_KEY_FILE)
+                secure_write_text(REALITY_KEY_FILE, json.dumps({"privKey": priv, "pubKey": pub, "shortId": short_id}, indent=2))
             else:
                 clean_out = re.sub(r"\s+", " ", out).strip()
                 logger.warning(f"[Reality] x25519 密钥解析未完全匹配 (输出: {clean_out})")
@@ -730,8 +748,7 @@ def get_reality_keys(xray_bin: Path):
             logger.error(f"[Reality] x25519 密钥生成失败: {e}")
     else:
         try:
-            REALITY_KEY_FILE.write_text(json.dumps({"privKey": priv, "pubKey": pub, "shortId": short_id}, indent=2), encoding="utf-8")
-            secure_permissions(REALITY_KEY_FILE)
+            secure_write_text(REALITY_KEY_FILE, json.dumps({"privKey": priv, "pubKey": pub, "shortId": short_id}, indent=2))
         except Exception:
             pass
     return priv, pub, short_id
@@ -800,7 +817,7 @@ def main():
     # 3. 异步探测公网 IP 与地理位置
     geo_country = "DEFAULT"
     raw_ip_conf = CONF_IP or os.environ.get("PUBLIC_IP") or os.environ.get("IP", "")
-    PUBLIC_IP = validate_ip(raw_ip_conf)
+    PUBLIC_IP = validate_host(raw_ip_conf)
     if raw_ip_conf and not PUBLIC_IP:
         logger.warning(f"[网络] 显式配置的 IP/域名格式无效: '{raw_ip_conf}'，将尝试自动探测公网 IP")
     NODE_NAME = (CONF_NAME or os.environ.get("NODE_NAME") or (os.environ.get("NAME") if not os.environ.get("WSL_DISTRO_NAME") else "") or "").strip()
@@ -946,7 +963,7 @@ def main():
                 "auth": "password",
                 "accounts": [{"user": S5_USER, "pass": S5_PASS}],
                 "udp": True,
-                **({"ip": PUBLIC_IP} if PUBLIC_IP else {})
+                **({"ip": PUBLIC_IP} if validate_ip(PUBLIC_IP) else {})
             }
         })
 
@@ -969,8 +986,7 @@ def main():
         ]
     }
 
-    CONFIG_FILE.write_text(json.dumps(xray_conf, indent=2), encoding="utf-8")
-    secure_permissions(CONFIG_FILE)
+    secure_write_text(CONFIG_FILE, json.dumps(xray_conf, indent=2))
 
     # 预校验配置
     try:
@@ -1090,8 +1106,7 @@ def main():
             b64 = base64.b64encode("\n".join(links).encode("utf-8")).decode("utf-8")
             sub_content_holder[0] = b64
             try:
-                SUB_FILE.write_text(b64, encoding="utf-8")
-                secure_permissions(SUB_FILE)
+                secure_write_text(SUB_FILE, b64)
             except Exception:
                 pass
             return links, b64

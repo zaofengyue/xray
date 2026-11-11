@@ -392,9 +392,15 @@ const LISTEN_ADDR = checkIpv6Supported() ? '::' : '0.0.0.0';
 function validateIp(raw) {
   if (!raw || typeof raw !== 'string') return '';
   const cand = raw.trim().replace(/^\[/, '').replace(/\]$/, '');
-  if (net.isIP(cand)) return cand;
-  // 允许合规的域名/DDNS 主机名 (总长 <= 253, 标签 1-63 字符且符合 RFC 1123, 至少包含一个点)
-  if (cand.length <= 253 && /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/.test(cand)) {
+  return net.isIP(cand) ? cand : '';
+}
+
+function validateHost(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const cand = raw.trim().replace(/^\[/, '').replace(/\]$/, '');
+  if (validateIp(cand)) return cand;
+  // 允许合规的域名/DDNS 主机名 (总长 <= 253, 标签 1-63 字符且符合 RFC 1123, 最后一个标签 TLD 必须包含字母，杜绝全数字伪 IP)
+  if (cand.length <= 253 && /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*$/.test(cand)) {
     return cand;
   }
   return '';
@@ -711,7 +717,12 @@ async function prepareXrayCore() {
       }
       console.log(`[Xray] 核心包 SHA256 校验通过 (${expectedSha256.slice(0, 16)}...)`);
     } else {
-      console.warn('[Xray] 未能获取有效 SHA256 校验和，已跳过哈希核验');
+      const allowUnverified = ['true', '1'].includes(String(process.env.ALLOW_UNVERIFIED_BIN || '').toLowerCase());
+      if (allowUnverified) {
+        console.warn('[Xray] 未能获取有效 SHA256 校验和，因 ALLOW_UNVERIFIED_BIN=true 降级跳过哈希核验');
+      } else {
+        throw new Error('[安全错误] 未能获取 Xray 的有效 SHA256 校验和 (.dgst)，已中止执行！如需强制跳过校验，请设置环境变量 ALLOW_UNVERIFIED_BIN=true');
+      }
     }
 
     extractZip(tmpZip, tmpExtract);
@@ -988,7 +999,7 @@ async function main() {
   let geoCountry = 'DEFAULT';
   let geoOrg = '';
   const rawIpConf = PRESET_IP || process.env.PUBLIC_IP || process.env.IP || '';
-  let PUBLIC_IP = validateIp(rawIpConf);
+  let PUBLIC_IP = validateHost(rawIpConf);
   if (rawIpConf && !PUBLIC_IP) {
     console.warn(`[网络] 显式配置的 IP/域名格式无效: '${rawIpConf}'，将尝试自动探测公网 IP`);
   }
@@ -1145,7 +1156,7 @@ async function main() {
         auth: 'password',
         accounts: [{ user: S5_USER, pass: S5_PASS }],
         udp: true,
-        ...(PUBLIC_IP ? { ip: PUBLIC_IP } : {})
+        ...(validateIp(PUBLIC_IP) ? { ip: PUBLIC_IP } : {})
       }
     });
   }
