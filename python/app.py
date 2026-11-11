@@ -49,12 +49,12 @@ import base64
 import hmac
 import http.client
 import http.server
+import ipaddress
 import json
 import logging
 import os
 import platform
 import re
-import select
 import selectors
 import shutil
 import signal
@@ -64,6 +64,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -171,27 +172,52 @@ CONFIG_FILE = CORE_DIR / ".config.json"
 REALITY_KEY_FILE = CORE_DIR / ".reality-keys.json"
 SUB_FILE = CORE_DIR / "sub.txt"
 PID_FILE = CORE_DIR / ".pids"
+pid_lock = threading.Lock()
 
 def record_pid(pid: int):
-    try:
-        pids = []
-        if PID_FILE.exists():
-            pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip()]
-        if str(pid) not in pids:
-            pids.append(str(pid))
-            PID_FILE.write_text("\n".join(pids), encoding="utf-8")
-            secure_permissions(PID_FILE)
-    except Exception:
-        pass
+    with pid_lock:
+        try:
+            pids = []
+            if PID_FILE.exists():
+                pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip()]
+            if str(pid) not in pids:
+                pids.append(str(pid))
+                PID_FILE.write_text("\n".join(pids), encoding="utf-8")
+                secure_permissions(PID_FILE)
+        except Exception:
+            pass
 
 def remove_pid(pid: int):
+    with pid_lock:
+        try:
+            if PID_FILE.exists():
+                pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and p.strip() != str(pid)]
+                PID_FILE.write_text("\n".join(pids), encoding="utf-8")
+                secure_permissions(PID_FILE)
+        except Exception:
+            pass
+
+def check_ipv6_supported() -> bool:
+    if not socket.has_ipv6:
+        return False
     try:
-        if PID_FILE.exists():
-            pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and p.strip() != str(pid)]
-            PID_FILE.write_text("\n".join(pids), encoding="utf-8")
-            secure_permissions(PID_FILE)
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(('::1', 0))
+            return True
     except Exception:
-        pass
+        return False
+
+LISTEN_ADDR = "::" if check_ipv6_supported() else "0.0.0.0"
+
+def validate_ip(raw: str) -> str:
+    if not raw or not isinstance(raw, str):
+        return ""
+    cand = raw.strip().strip("[]")
+    try:
+        ipaddress.ip_address(cand)
+        return cand
+    except Exception:
+        return ""
 
 def kill_stale_pids():
     try:
@@ -693,7 +719,8 @@ def get_reality_keys(xray_bin: Path):
                 REALITY_KEY_FILE.write_text(json.dumps({"privKey": priv, "pubKey": pub, "shortId": short_id}, indent=2), encoding="utf-8")
                 secure_permissions(REALITY_KEY_FILE)
             else:
-                logger.warning(f"[Reality] x25519 密钥解析未完全匹配 (输出: {re.sub(r'\\s+', ' ', out).strip()})")
+                clean_out = re.sub(r"\s+", " ", out).strip()
+                logger.warning(f"[Reality] x25519 密钥解析未完全匹配 (输出: {clean_out})")
         except Exception as e:
             logger.error(f"[Reality] x25519 密钥生成失败: {e}")
     else:
@@ -767,7 +794,7 @@ def main():
 
     # 3. 异步探测公网 IP 与地理位置
     geo_country = "DEFAULT"
-    PUBLIC_IP = (CONF_IP or os.environ.get("PUBLIC_IP") or os.environ.get("IP", "")).strip()
+    PUBLIC_IP = validate_ip(CONF_IP or os.environ.get("PUBLIC_IP") or os.environ.get("IP", ""))
     NODE_NAME = (CONF_NAME or os.environ.get("NODE_NAME") or (os.environ.get("NAME") if not os.environ.get("WSL_DISTRO_NAME") else "") or "").strip()
 
     def probe_geo():
@@ -777,7 +804,7 @@ def main():
             if data_str:
                 data = json.loads(data_str)
                 if not PUBLIC_IP:
-                    PUBLIC_IP = (data.get("ip") or "").strip()
+                    PUBLIC_IP = validate_ip(data.get("ip") or "")
                 c = (data.get("country") or "").strip().upper()
                 if c:
                     geo_country = c
@@ -789,7 +816,8 @@ def main():
                 def get_ip():
                     nonlocal PUBLIC_IP
                     if not PUBLIC_IP:
-                        PUBLIC_IP = http_get("https://ifconfig.co/ip", timeout=3.0) or http_get("https://api.ipify.org", timeout=3.0)
+                        cand = http_get("https://ifconfig.co/ip", timeout=3.0) or http_get("https://api.ipify.org", timeout=3.0)
+                        PUBLIC_IP = validate_ip(cand)
                 def get_c():
                     nonlocal geo_country
                     c = http_get("https://ipinfo.io/country", timeout=3.0)
@@ -863,7 +891,7 @@ def main():
             inbounds.append({
                 "tag": "reality-in",
                 "port": int(REALITY_PORT),
-                "listen": "::",
+                "listen": LISTEN_ADDR,
                 "protocol": "vless",
                 "settings": {
                     "clients": [{"id": UUID, "flow": "xtls-rprx-vision"}],
@@ -890,7 +918,7 @@ def main():
         inbounds.append({
             "tag": "ss-in",
             "port": int(SS_PORT),
-            "listen": "::",
+            "listen": LISTEN_ADDR,
             "protocol": "shadowsocks",
             "settings": {
                 "method": "2022-blake3-aes-128-gcm",
@@ -904,7 +932,7 @@ def main():
         inbounds.append({
             "tag": "s5-in",
             "port": int(S5_PORT),
-            "listen": "::",
+            "listen": LISTEN_ADDR,
             "protocol": "socks",
             "settings": {
                 "auth": "password",
@@ -1069,47 +1097,53 @@ def main():
             pass
 
         def do_GET(self):
-            self.route_request()
+            self.route_request(send_body=True)
 
         def do_POST(self):
-            self.route_request()
+            self.route_request(send_body=True)
 
         def do_HEAD(self):
-            self.route_request()
+            self.route_request(send_body=False)
 
         def do_OPTIONS(self):
-            self.route_request()
+            self.route_request(send_body=True)
 
-        def route_request(self):
+        def route_request(self, send_body: bool = True):
             parsed = urllib.parse.urlparse(self.path)
 
-            # A. xhttp (SplitHTTP) 流反代
+            # A. xhttp (SplitHTTP) 流反代（仅在 argo_server 上分流，或者在无 Argo / 显式开启直连时在主端口分流）
             if parsed.path == XHTTP_PATH_VLESS or parsed.path.startswith(XHTTP_PATH_VLESS + "/"):
-                self.proxy_stream(V_XHTTP_PORT)
-                return
+                is_main_server = (self.server.server_address[1] == INBOUND_PORT)
+                allow_xhttp = (not is_main_server) or DISABLE_ARGO or (os.environ.get("ENABLE_DIRECT_WS", "").lower() == "true")
+                if allow_xhttp:
+                    self.proxy_stream(V_XHTTP_PORT)
+                    return
 
             # B. 订阅接口
             if parsed.path.strip("/") == SUB_PATH:
                 if SUB_TOKEN:
                     query_params = urllib.parse.parse_qs(parsed.query)
                     token_val = query_params.get("token", [""])[0]
-                    if not hmac.compare_digest(token_val, SUB_TOKEN):
+                    if not hmac.compare_digest(token_val.encode("utf-8", errors="ignore"), SUB_TOKEN.encode("utf-8", errors="ignore")):
                         self.send_response(404)
                         self.send_header("Content-Type", "text/plain; charset=utf-8")
                         self.end_headers()
-                        self.wfile.write(b"Not Found")
+                        if send_body:
+                            self.wfile.write(b"Not Found")
                         return
                 if not sub_content_holder[0]:
                     self.send_response(503)
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
                     self.end_headers()
-                    self.wfile.write(b"Tunnel initializing, please retry in 5 seconds...")
+                    if send_body:
+                        self.wfile.write(b"Tunnel initializing, please retry in 5 seconds...")
                     return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache, no-store")
                 self.end_headers()
-                self.wfile.write(sub_content_holder[0].encode("utf-8"))
+                if send_body:
+                    self.wfile.write(sub_content_holder[0].encode("utf-8"))
                 return
 
             # C. 伪装网页
@@ -1117,7 +1151,8 @@ def main():
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "public, max-age=3600")
             self.end_headers()
-            self.wfile.write(camouflage_html.encode("utf-8"))
+            if send_body:
+                self.wfile.write(camouflage_html.encode("utf-8"))
 
         def handle_one_request(self):
             # 捕获 WebSocket Upgrade 升级
@@ -1223,6 +1258,7 @@ def main():
     class ThreadedTCPServer(http.server.ThreadingHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
+        request_queue_size = 128
 
     if not DISABLE_ARGO:
         argo_listen_host = "0.0.0.0" if XHTTP_DOWN_MODE == "cdn" else "127.0.0.1"
@@ -1354,7 +1390,7 @@ def main():
                     while not is_shutting_down:
                         proc = None
                         try:
-                            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            proc = subprocess.Popen(cmd, env=get_safe_env(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
                             if proc.pid:
                                 record_pid(proc.pid)
                             tracked_subprocesses.append(proc)
@@ -1406,6 +1442,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        pass
     except Exception as e:
         logger.error(f"[致命错误] 服务中断: {e}", exc_info=True)
-        sys.exit(1)
+    finally:
+        graceful_exit()

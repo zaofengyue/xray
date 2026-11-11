@@ -377,6 +377,24 @@ function timingSafeEqualStr(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+function checkIpv6Supported() {
+  try {
+    const s = net.createServer();
+    s.listen(0, '::1');
+    s.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+const LISTEN_ADDR = checkIpv6Supported() ? '::' : '0.0.0.0';
+
+function validateIp(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const cand = raw.trim().replace(/^\[/, '').replace(/\]$/, '');
+  return net.isIP(cand) ? cand : '';
+}
+
 function httpGet(url, timeoutMs = 3000) {
   return new Promise((resolve) => {
     try {
@@ -964,7 +982,7 @@ async function main() {
   // 3. 异步并发地理探测与节点名称预解析
   let geoCountry = 'DEFAULT';
   let geoOrg = '';
-  let PUBLIC_IP = (PRESET_IP || process.env.PUBLIC_IP || process.env.IP || '').trim();
+  let PUBLIC_IP = validateIp(PRESET_IP || process.env.PUBLIC_IP || process.env.IP || '');
   let NODE_NAME = (PRESET_NAME || process.env.NODE_NAME || (process.env.NAME && !process.env.WSL_DISTRO_NAME ? process.env.NAME : '')).trim();
 
   const geoPromise = (async () => {
@@ -974,7 +992,7 @@ async function main() {
         if (jsonStr) {
           try {
             const data = JSON.parse(jsonStr);
-            if (!PUBLIC_IP && data.ip) PUBLIC_IP = String(data.ip).trim();
+            if (!PUBLIC_IP && data.ip) PUBLIC_IP = validateIp(String(data.ip));
             if (data.country) geoCountry = String(data.country).trim().toUpperCase();
             if (data.org) geoOrg = String(data.org).trim();
           } catch {}
@@ -984,7 +1002,7 @@ async function main() {
     if (!PUBLIC_IP) {
       try {
         const ipStr = await httpGet('https://api.ipify.org');
-        if (ipStr) PUBLIC_IP = ipStr.trim();
+        if (ipStr) PUBLIC_IP = validateIp(ipStr);
       } catch {}
     }
     if (!NODE_NAME) {
@@ -1063,7 +1081,7 @@ async function main() {
       inbounds.push({
         tag: 'reality-in',
         port: parseInt(REALITY_PORT, 10),
-        listen: '::',
+        listen: LISTEN_ADDR,
         protocol: 'vless',
         settings: {
           clients: [{ id: UUID, flow: 'xtls-rprx-vision' }],
@@ -1096,7 +1114,7 @@ async function main() {
     inbounds.push({
       tag: 'ss-in',
       port: parseInt(SS_PORT, 10),
-      listen: '::',
+      listen: LISTEN_ADDR,
       protocol: 'shadowsocks',
       settings: {
         method: '2022-blake3-aes-128-gcm',
@@ -1112,7 +1130,7 @@ async function main() {
     inbounds.push({
       tag: 's5-in',
       port: parseInt(S5_PORT, 10),
-      listen: '::',
+      listen: LISTEN_ADDR,
       protocol: 'socks',
       settings: {
         auth: 'password',
@@ -1189,35 +1207,39 @@ async function main() {
     }
     const pathname = urlObj.pathname;
 
-    // A. VLESS-xhttp (SplitHTTP) 流反向代理
+    // A. VLESS-xhttp (SplitHTTP) 流反向代理（仅在内部 argoServer 或禁用 Argo / 显式开启直连时分流）
     if (pathname === XHTTP_PATH_VLESS || pathname.startsWith(XHTTP_PATH_VLESS + '/')) {
-      const proxyReq = http.request({
-        host: '127.0.0.1',
-        port: V_XHTTP_PORT,
-        method: req.method,
-        path: req.url,
-        headers: req.headers
-      }, (proxyRes) => {
-        proxyRes.on('error', () => {
-          res.destroy();
+      const isMainServer = req.socket && req.socket.localPort === parseInt(INBOUND_PORT, 10);
+      const allowXhttp = !isMainServer || DISABLE_ARGO || process.env.ENABLE_DIRECT_WS === 'true';
+      if (allowXhttp) {
+        const proxyReq = http.request({
+          host: '127.0.0.1',
+          port: V_XHTTP_PORT,
+          method: req.method,
+          path: req.url,
+          headers: req.headers
+        }, (proxyRes) => {
+          proxyRes.on('error', () => {
+            res.destroy();
+          });
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          proxyRes.pipe(res);
         });
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        proxyRes.pipe(res);
-      });
-      proxyReq.on('error', (err) => {
-        if (!res.headersSent) {
-          res.writeHead(502, { 'Content-Type': 'text/plain' });
-          res.end(`Bad Gateway: ${err.message}`);
-        } else {
-          res.destroy();
-        }
-      });
-      res.on('close', () => {
-        if (!res.writableEnded) proxyReq.destroy();
-      });
-      req.on('error', () => proxyReq.destroy());
-      req.pipe(proxyReq);
-      return;
+        proxyReq.on('error', (err) => {
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end(`Bad Gateway: ${err.message}`);
+          } else {
+            res.destroy();
+          }
+        });
+        res.on('close', () => {
+          if (!res.writableEnded) proxyReq.destroy();
+        });
+        req.on('error', () => proxyReq.destroy());
+        req.pipe(proxyReq);
+        return;
+      }
     }
 
     // B. /sub 节点订阅接口
