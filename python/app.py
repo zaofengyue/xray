@@ -1271,10 +1271,14 @@ def main():
                 sel = selectors.DefaultSelector()
                 sel.register(client_sock, selectors.EVENT_READ, target_sock)
                 sel.register(target_sock, selectors.EVENT_READ, client_sock)
+                IDLE_LIMIT = 300  # 秒，长轮询与长连接留足余量 (5分钟)，防慢连接耗尽系统线程
+                last_activity = time.time()
                 try:
-                    while not is_shutting_down:
-                        events = sel.select(timeout=30.0)
+                    while sel.get_map() and not is_shutting_down:
+                        events = sel.select(timeout=5.0)
                         if not events:
+                            if time.time() - last_activity > IDLE_LIMIT:
+                                break
                             continue
                         for key, mask in events:
                             s = key.fileobj
@@ -1284,7 +1288,16 @@ def main():
                             except Exception:
                                 return
                             if not data:
-                                return
+                                try:
+                                    sel.unregister(s)
+                                except Exception:
+                                    pass
+                                try:
+                                    other.shutdown(socket.SHUT_WR)
+                                except Exception:
+                                    pass
+                                continue
+                            last_activity = time.time()
                             try:
                                 other.sendall(data)
                             except Exception:

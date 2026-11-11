@@ -1251,6 +1251,14 @@ async function main() {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           proxyRes.pipe(res);
         });
+        proxyReq.setTimeout(300000, () => {
+          proxyReq.destroy();
+          res.destroy();
+        });
+        req.setTimeout(300000, () => {
+          req.destroy();
+          proxyReq.destroy();
+        });
         proxyReq.on('error', (err) => {
           if (!res.headersSent) {
             res.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -1325,6 +1333,11 @@ async function main() {
       socket.pipe(proxy);
       proxy.pipe(socket);
     });
+
+    socket.setTimeout(300000);
+    socket.on('timeout', () => socket.destroy());
+    proxy.setTimeout(300000);
+    proxy.on('timeout', () => proxy.destroy());
 
     proxy.on('error', () => socket.destroy());
     socket.on('error', () => proxy.destroy());
