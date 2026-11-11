@@ -190,7 +190,10 @@ function killStalePids() {
           if (os.platform() === 'linux') {
             try {
               const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
-              shouldKill = /worker|bridge|metrics|cloudflared|xray/i.test(cmdline);
+              const isOurArgv0  = /\/app\/(worker|bridge|metrics)\.js/i.test(cmdline);
+              const isInCoreDir = CORE_DIR && cmdline.includes(CORE_DIR);
+              const hasConfig   = cmdline.includes('.config.json');
+              shouldKill = isOurArgv0 || isInCoreDir || hasConfig;
             } catch {
               shouldKill = false;
             }

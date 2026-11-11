@@ -204,7 +204,10 @@ def kill_stale_pids():
                     if platform.system().lower() == "linux":
                         try:
                             cmdline = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="ignore")
-                            should_kill = bool(re.search(r"worker|bridge|metrics|cloudflared|xray", cmdline, re.I))
+                            is_our_argv0 = bool(re.search(r"/app/(worker|bridge|metrics)\.js", cmdline, re.I))
+                            is_in_core = str(CORE_DIR) in cmdline
+                            has_config = ".config.json" in cmdline
+                            should_kill = is_our_argv0 or is_in_core or has_config
                         except Exception:
                             should_kill = False
                     if should_kill:
