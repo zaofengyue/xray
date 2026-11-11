@@ -55,6 +55,7 @@ import os
 import platform
 import re
 import select
+import selectors
 import shutil
 import signal
 import socket
@@ -160,9 +161,12 @@ CORE_DIR = resolve_core_dir()
 os.environ["XRAY_LOCATION_ASSET"] = str(CORE_DIR)
 
 UUID_FILE = CORE_DIR / ".session.key"
+SUB_TOKEN_FILE = CORE_DIR / ".sub-token"
+SS_PASS_FILE = CORE_DIR / ".ss-pass"
+S5_CREDS_FILE = CORE_DIR / ".s5-creds.json"
 CONFIG_FILE = CORE_DIR / ".config.json"
 REALITY_KEY_FILE = CORE_DIR / ".reality-keys.json"
-SUB_FILE = Path.cwd() / "sub.txt"
+SUB_FILE = CORE_DIR / "sub.txt"
 
 XRAY_BIN_NAME = "worker.exe" if platform.system().lower() == "windows" else "worker"
 XRAY_BIN_PATH = CORE_DIR / XRAY_BIN_NAME
@@ -238,6 +242,71 @@ def get_or_generate_uuid() -> str:
         pass
     return gen
 
+def get_or_generate_sub_token(preset_token: str) -> str:
+    val = (preset_token or os.environ.get("SUB_TOKEN", "")).strip()
+    if val:
+        return val
+    if SUB_TOKEN_FILE.exists():
+        try:
+            saved = SUB_TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if saved:
+                return saved
+        except Exception:
+            pass
+    gen = os.urandom(16).hex()
+    try:
+        SUB_TOKEN_FILE.write_text(gen, encoding="utf-8")
+        secure_permissions(SUB_TOKEN_FILE)
+    except Exception:
+        pass
+    return gen
+
+def get_or_generate_ss_pass(preset_pass: str) -> str:
+    val = (preset_pass or os.environ.get("SS_PASS", "")).strip()
+    if val:
+        try:
+            dec = base64.b64decode(val)
+            if len(dec) == 16:
+                return val
+            logger.warning(f"[SS] 自定义 SS_PASS base64 解码后为 {len(dec)} 字节（必须为 16 字节），将自动生成标准密钥")
+        except Exception:
+            pass
+    if SS_PASS_FILE.exists():
+        try:
+            saved = SS_PASS_FILE.read_text(encoding="utf-8").strip()
+            if saved and len(base64.b64decode(saved)) == 16:
+                return saved
+        except Exception:
+            pass
+    gen = base64.b64encode(os.urandom(16)).decode("utf-8")
+    try:
+        SS_PASS_FILE.write_text(gen, encoding="utf-8")
+        secure_permissions(SS_PASS_FILE)
+    except Exception:
+        pass
+    return gen
+
+def get_or_generate_s5_creds(preset_user: str, preset_pass: str) -> tuple:
+    u = (preset_user or os.environ.get("S5_USER", "")).strip()
+    p = (preset_pass or os.environ.get("S5_PASS", "")).strip()
+    if u and p:
+        return u, p
+    if S5_CREDS_FILE.exists():
+        try:
+            saved = json.loads(S5_CREDS_FILE.read_text(encoding="utf-8"))
+            if saved.get("user") and saved.get("pass"):
+                return saved["user"], saved["pass"]
+        except Exception:
+            pass
+    u = u or ("u" + os.urandom(4).hex())
+    p = p or base64.urlsafe_b64encode(os.urandom(12)).decode("utf-8").rstrip("=")
+    try:
+        S5_CREDS_FILE.write_text(json.dumps({"user": u, "pass": p}, indent=2), encoding="utf-8")
+        secure_permissions(S5_CREDS_FILE)
+    except Exception:
+        pass
+    return u, p
+
 def http_get(url: str, timeout: float = 3.0) -> str:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -303,12 +372,17 @@ def resolve_reality_domain(country: str, custom_domain: str) -> str:
 # 二进制下载与解压
 # ──────────────────────────────────────────────
 def download_file(url: str, dest: Path, timeout: float = 30.0):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"下载失败: HTTP {resp.status}")
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(resp, f)
+    tmp_dest = dest.with_name(f"{dest.name}.tmp_{int(time.time()*1000)}")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"下载失败: HTTP {resp.status}")
+            with open(tmp_dest, "wb") as f:
+                shutil.copyfileobj(resp, f)
+        tmp_dest.replace(dest)
+    finally:
+        tmp_dest.unlink(missing_ok=True)
 
 def check_binary(p: Path, args: list) -> bool:
     if not p.exists():
@@ -384,6 +458,9 @@ def prepare_cloudflared() -> Path:
         try:
             download_file(url, tgz, 30.0)
             subprocess.run(["tar", "-xzf", str(tgz), "-C", str(CORE_DIR)], check=True)
+            extracted_bin = CORE_DIR / "cloudflared"
+            if extracted_bin.exists():
+                extracted_bin.replace(CF_BIN_PATH)
         finally:
             tgz.unlink(missing_ok=True)
     else:
@@ -400,16 +477,16 @@ def prepare_komari_agent():
         return Path(p)
 
     table = {
-        "linux": {"x86_64": "linux_amd64", "amd64": "linux_amd64", "aarch64": "linux_arm64", "arm64": "linux_arm64"},
-        "darwin": {"x86_64": "darwin_amd64", "arm64": "darwin_arm64"},
-        "windows": {"x86_64": "windows_amd64.exe", "amd64": "windows_amd64.exe"}
+        "linux": {"x86_64": "linux-amd64", "amd64": "linux-amd64", "aarch64": "linux-arm64", "arm64": "linux-arm64"},
+        "darwin": {"x86_64": "darwin-amd64", "arm64": "darwin-arm64"},
+        "windows": {"x86_64": "windows-amd64.exe", "amd64": "windows-amd64.exe"}
     }
     plat = platform.system().lower()
     arch = platform.machine().lower()
     suffix = table.get(plat, {}).get(arch)
     if not suffix:
         return None
-    url = f"https://github.com/komari-monitoring/komari-agent/releases/latest/download/komari-agent_{suffix}"
+    url = f"https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-{suffix}"
     try:
         download_file(url, KM_BIN_PATH, 20.0)
         make_executable(KM_BIN_PATH)
@@ -429,8 +506,8 @@ def supervise_process(tag: str, cmd: list, env: dict = None):
                 proc = subprocess.Popen(
                     cmd,
                     env=env or os.environ.copy(),
-                    stdout=subprocess.DEVNULL if "Fixed" not in tag and "Quick" not in tag else subprocess.PIPE,
-                    stderr=subprocess.PIPE
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
                 )
                 tracked_subprocesses.append(proc)
                 proc.wait()
@@ -478,13 +555,15 @@ def get_reality_keys(xray_bin: Path):
             pass
     if not priv or not pub:
         try:
-            out = subprocess.check_output([str(xray_bin), "x25519"], text=True, stderr=subprocess.STDOUT)
-            m_priv = re.search(r"Private\s*key:\s*(\S+)", out, re.I)
-            m_pub  = re.search(r"Public\s*key:\s*(\S+)", out, re.I)
+            out = subprocess.check_output([str(xray_bin), "x25519"], text=True, stderr=subprocess.STDOUT, timeout=5)
+            m_priv = re.search(r"(?:Private\s*key|PrivateKey)\s*:\s*(\S+)", out, re.I)
+            m_pub  = re.search(r"(?:Password\s*\(PublicKey\)|Public\s*key|PublicKey|Password)\s*:\s*(\S+)", out, re.I)
             if m_priv and m_pub:
                 priv, pub = m_priv.group(1), m_pub.group(1)
                 REALITY_KEY_FILE.write_text(json.dumps({"privKey": priv, "pubKey": pub}, indent=2), encoding="utf-8")
                 secure_permissions(REALITY_KEY_FILE)
+            else:
+                logger.warning(f"[Reality] x25519 密钥解析未完全匹配 (输出: {re.sub(r'\\s+', ' ', out).strip()})")
         except Exception as e:
             logger.error(f"[Reality] x25519 密钥生成失败: {e}")
     return priv, pub
@@ -508,7 +587,7 @@ def main():
     UUID = get_or_generate_uuid()
     TROJAN_PASS = UUID
     SUB_PATH = (CONF_SUB or os.environ.get("SUB", "sub")).strip().lstrip("/")
-    SUB_TOKEN = (CONF_SUB_TOKEN or os.environ.get("SUB_TOKEN", "")).strip()
+    SUB_TOKEN = get_or_generate_sub_token(CONF_SUB_TOKEN)
     INBOUND_PORT = int(CONF_PORT or os.environ.get("PORT") or find_available_port(3000))
     ARGO_PORT = int(CONF_ARGO_PORT or os.environ.get("ARGO_PORT", "8001"))
     DISABLE_ARGO = (CONF_DISABLE_ARGO or os.environ.get("DISABLE_ARGO", "")).lower() == "true"
@@ -522,10 +601,9 @@ def main():
 
     REALITY_PORT = (CONF_REALITY_PORT or os.environ.get("REALITY_PORT", "")).strip()
     SS_PORT = (CONF_SS_PORT or os.environ.get("SS_PORT", "")).strip()
-    SS_PASS = (CONF_SS_PASS or os.environ.get("SS_PASS", "") or base64.b64encode(os.urandom(16)).decode("utf-8")).strip()
+    SS_PASS = get_or_generate_ss_pass(CONF_SS_PASS)
     S5_PORT = (CONF_S5_PORT or os.environ.get("S5_PORT", "")).strip()
-    S5_USER = (CONF_S5_USER or os.environ.get("S5_USER", "") or UUID[:8]).strip()
-    S5_PASS = (CONF_S5_PASS or os.environ.get("S5_PASS", "") or UUID[-12:]).strip()
+    S5_USER, S5_PASS = get_or_generate_s5_creds(CONF_S5_USER, CONF_S5_PASS)
 
     KOMARI_DOMAIN = (CONF_KOMARI_DOMAIN or os.environ.get("KOMARI_DOMAIN", "")).strip()
     KOMARI_TOKEN  = (CONF_KOMARI_TOKEN  or os.environ.get("KOMARI_TOKEN", "")).strip()
@@ -541,7 +619,7 @@ def main():
     def probe_geo():
         nonlocal PUBLIC_IP, geo_country, NODE_NAME
         try:
-            data_str = http_get("https://ipinfo.io/json")
+            data_str = http_get("https://ipinfo.io/json", timeout=3.0)
             if data_str:
                 data = json.loads(data_str)
                 if not PUBLIC_IP:
@@ -554,19 +632,27 @@ def main():
                     clean_org = re.sub(r"[^a-zA-Z0-9]", "", org) if org else ""
                     NODE_NAME = f"{geo_country}-{clean_org}" if geo_country and clean_org else (geo_country or "xray")
             else:
-                if not PUBLIC_IP:
-                    PUBLIC_IP = http_get("https://ifconfig.co/ip") or http_get("https://api.ipify.org")
-                c = http_get("https://ipinfo.io/country")
-                if c:
-                    geo_country = c.strip().upper()
+                def get_ip():
+                    nonlocal PUBLIC_IP
+                    if not PUBLIC_IP:
+                        PUBLIC_IP = http_get("https://ifconfig.co/ip", timeout=3.0) or http_get("https://api.ipify.org", timeout=3.0)
+                def get_c():
+                    nonlocal geo_country
+                    c = http_get("https://ipinfo.io/country", timeout=3.0)
+                    if c:
+                        geo_country = c.strip().upper()
+                t1 = threading.Thread(target=get_ip, daemon=True)
+                t2 = threading.Thread(target=get_c, daemon=True)
+                t1.start(); t2.start()
+                t1.join(timeout=3.5); t2.join(timeout=3.5)
         except Exception:
             pass
         if not NODE_NAME:
-            NODE_NAME = "xray"
+            NODE_NAME = geo_country if geo_country != "DEFAULT" else "xray"
 
     geo_thread = threading.Thread(target=probe_geo, daemon=True)
     geo_thread.start()
-    geo_thread.join(timeout=3.0)  # 等待地理探测与 IP 解析完成，确保 Reality 伪装域名匹配实际地理区域
+    geo_thread.join(timeout=5.0)  # 等待地理探测与 IP 解析完成，确保 Reality 伪装域名匹配实际地理区域
 
     # 4. 构建 Xray 配置
     inbounds = []
@@ -625,7 +711,7 @@ def main():
                 "settings": {
                     "clients": [{"id": UUID, "flow": "xtls-rprx-vision"}],
                     "decryption": "none",
-                    "fallbacks": [{"dest": V_XHTTP_PORT, "xver": 0}]
+                    **({"fallbacks": [{"dest": V_XHTTP_PORT, "xver": 0}]} if not DISABLE_ARGO else {})
                 },
                 "streamSettings": {
                     "network": "tcp",
@@ -799,6 +885,8 @@ def main():
 
     # 内部分流 HTTP / WS Server (多路复用网关)
     class MultiProxyHandler(http.server.BaseHTTPRequestHandler):
+        timeout = 30
+
         def log_message(self, format, *args):
             pass
 
@@ -886,6 +974,7 @@ def main():
             try:
                 target_sock = socket.create_connection(("127.0.0.1", port), timeout=10)
                 client_sock = self.connection
+                client_sock.settimeout(None)
 
                 # 发送重组的 HTTP 请求行与请求头至内部端口
                 target_sock.sendall(self.raw_requestline)
@@ -910,18 +999,30 @@ def main():
                 if buf_list:
                     target_sock.sendall(b"".join(buf_list))
 
-                # 双向全双工转发
-                sockets = [client_sock, target_sock]
-                while not is_shutting_down:
-                    r, _, x = select.select(sockets, [], sockets, 60.0)
-                    if x or not r:
-                        break
-                    for s in r:
-                        other = target_sock if s is client_sock else client_sock
-                        data = s.recv(65536)
-                        if not data:
-                            return
-                        other.sendall(data)
+                # 双向全双工透明事件分流转发 (DefaultSelector 支持高并发并解除 FD 1024 上限)
+                sel = selectors.DefaultSelector()
+                sel.register(client_sock, selectors.EVENT_READ, target_sock)
+                sel.register(target_sock, selectors.EVENT_READ, client_sock)
+                try:
+                    while not is_shutting_down:
+                        events = sel.select(timeout=30.0)
+                        if not events:
+                            continue
+                        for key, mask in events:
+                            s = key.fileobj
+                            other = key.data
+                            try:
+                                data = s.recv(65536)
+                            except Exception:
+                                return
+                            if not data:
+                                return
+                            try:
+                                other.sendall(data)
+                            except Exception:
+                                return
+                finally:
+                    sel.close()
             except Exception:
                 pass
             finally:
@@ -955,13 +1056,19 @@ def main():
         if not token or not chat_id:
             return
         sub_token_query = f"?token={urllib.parse.quote(SUB_TOKEN)}" if SUB_TOKEN else ""
+        primary_sub_url = (
+            f"https://{h}/{SUB_PATH}{sub_token_query}"
+            if not DISABLE_ARGO and h
+            else f"http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}"
+        )
+        safe_node = re.sub(r"[`]", "", NODE_NAME or "xray")
         text = (
             f"🎉 *Xray 节点部署成功通知 (Python)*\n"
-            f"*节点*: `{NODE_NAME}`\n"
+            f"*节点*: `{safe_node}`\n"
         )
         if not DISABLE_ARGO and h:
             text += f"*域名*: `{h}`\n"
-        text += f"*订阅*: `http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}`"
+        text += f"*订阅*: `{primary_sub_url}`"
 
         payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode("utf-8")
         try:
@@ -979,10 +1086,15 @@ def main():
         cur_links, _ = build_subscription(prefer_host, h)
         if (CONF_SHOW_LOG or os.environ.get("SHOW_LOG", "true")).lower() != "false":
             sub_token_query = f"?token={urllib.parse.quote(SUB_TOKEN)}" if SUB_TOKEN else ""
+            primary_sub_url = (
+                f"https://{h}/{SUB_PATH}{sub_token_query}"
+                if not DISABLE_ARGO and h
+                else f"http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}"
+            )
             print("\n============================================================")
             print("🚀 Xray 多功能综合穿透代理服务已就绪 (Python)")
             print(f"📌 节点标识: {NODE_NAME} (地区: {geo_country})")
-            print(f"🔗 外部订阅: http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}")
+            print(f"🔗 外部订阅: {primary_sub_url}")
             if not DISABLE_ARGO and h:
                 print(f"🛡️ Argo 域名: {h}")
             print("---------------- 节点订阅明细 ----------------")
@@ -1005,58 +1117,81 @@ def main():
 
     # 6. 启动 Cloudflared
     if not DISABLE_ARGO:
-        cf_bin = prepare_cloudflared()
-        if ARGO_DOMAIN and ARGO_AUTH:
-            logger.info(f"[Argo] 启动固定隧道: {ARGO_DOMAIN}...")
-            cmd = [str(cf_bin), "tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
-            if ARGO_PROTOCOL:
-                cmd.extend(["--protocol", ARGO_PROTOCOL])
-            cmd.append("run")
-            env = os.environ.copy()
-            env["TUNNEL_TOKEN"] = ARGO_AUTH
-            def cf_runner():
-                while not is_shutting_down:
-                    proc = subprocess.Popen(cmd, env=env, stderr=subprocess.PIPE, text=True)
-                    tracked_subprocesses.append(proc)
-                    for line in proc.stderr:
-                        if "Registered tunnel connection" in line:
-                            logger.info("[Argo] 固定隧道已建立连接 (Registered tunnel connection)")
-                            on_ready(ARGO_DOMAIN)
-                    proc.wait()
-                    time.sleep(3.0)
-            threading.Thread(target=cf_runner, daemon=True).start()
-        else:
-            logger.info("[Argo] 启动临时隧道 (Quick Tunnel)...")
-            cmd = [str(cf_bin), "tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
-            if ARGO_PROTOCOL:
-                cmd.extend(["--protocol", ARGO_PROTOCOL])
-            cmd.extend(["--url", f"http://127.0.0.1:{ARGO_PORT}"])
-            def quick_runner():
-                while not is_shutting_down:
-                    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True)
-                    tracked_subprocesses.append(proc)
-                    for line in proc.stderr:
-                        m = re.search(r"https://([a-zA-Z0-9-]+\.trycloudflare\.com)", line)
-                        if m:
-                            nh = m.group(1)
-                            if nh != current_argo_host[0]:
-                                current_argo_host[0] = nh
-                                logger.info(f"[Argo] 临时域名已分配: https://{nh}")
-                                on_ready(nh)
-                    proc.wait()
-                    time.sleep(3.0)
-            threading.Thread(target=quick_runner, daemon=True).start()
+        try:
+            cf_bin = prepare_cloudflared()
+            if ARGO_DOMAIN and ARGO_AUTH:
+                logger.info(f"[Argo] 启动固定隧道: {ARGO_DOMAIN}...")
+                cmd = [str(cf_bin), "tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
+                if ARGO_PROTOCOL:
+                    cmd.extend(["--protocol", ARGO_PROTOCOL])
+                cmd.append("run")
+                env = os.environ.copy()
+                env["TUNNEL_TOKEN"] = ARGO_AUTH
+                def cf_runner():
+                    fixed_notified = False
+                    while not is_shutting_down:
+                        try:
+                            proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            tracked_subprocesses.append(proc)
+                            for line in proc.stderr:
+                                if "Registered tunnel connection" in line:
+                                    if not fixed_notified:
+                                        fixed_notified = True
+                                        logger.info("[Argo] 固定隧道已建立连接 (Registered tunnel connection)")
+                                        on_ready(ARGO_DOMAIN)
+                            proc.wait()
+                        except Exception as e:
+                            logger.warning(f"[Argo] 固定隧道运行异常: {e}")
+                        fixed_notified = False
+                        time.sleep(3.0)
+                threading.Thread(target=cf_runner, daemon=True).start()
+            else:
+                logger.info("[Argo] 启动临时隧道 (Quick Tunnel)...")
+                cmd = [str(cf_bin), "tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
+                if ARGO_PROTOCOL:
+                    cmd.extend(["--protocol", ARGO_PROTOCOL])
+                cmd.extend(["--url", f"http://127.0.0.1:{ARGO_PORT}"])
+                def quick_runner():
+                    while not is_shutting_down:
+                        try:
+                            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            tracked_subprocesses.append(proc)
+                            for line in proc.stderr:
+                                m = re.search(r"https://([a-zA-Z0-9-]+\.trycloudflare\.com)", line)
+                                if m:
+                                    nh = m.group(1)
+                                    if nh != current_argo_host[0]:
+                                        current_argo_host[0] = nh
+                                        logger.info(f"[Argo] 临时域名已分配: https://{nh}")
+                                        on_ready(nh)
+                            proc.wait()
+                        except Exception as e:
+                            logger.warning(f"[Argo] 临时隧道运行异常: {e}")
+                        time.sleep(3.0)
+                threading.Thread(target=quick_runner, daemon=True).start()
+        except Exception as err:
+            logger.error(f"[Argo] 隧道启动异常: {err}")
     else:
         logger.info("[Argo] 隧道已被禁用 (DISABLE_ARGO=true)，仅运行直连与本地分流服务")
         on_ready("")
 
     # 7. 启动 Komari
     if KOMARI_DOMAIN and KOMARI_TOKEN:
-        km_bin = prepare_komari_agent()
-        if km_bin:
-            setup_container_uptime()
-            km_cmd = [str(km_bin), "-e", re.sub(r"^https?://", "", KOMARI_DOMAIN), "-t", KOMARI_TOKEN]
-            supervise_process("Komari-Agent", km_cmd)
+        try:
+            km_bin = prepare_komari_agent()
+            if km_bin:
+                setup_container_uptime()
+                km_endpoint = KOMARI_DOMAIN.strip()
+                if not re.match(r"^https?://", km_endpoint, re.I):
+                    km_endpoint = f"https://{km_endpoint}"
+                km_cmd = [str(km_bin), "--disable-web-ssh", "--disable-auto-update", "-e", km_endpoint]
+                km_env = os.environ.copy()
+                km_env["AGENT_ENDPOINT"] = km_endpoint
+                km_env["AGENT_TOKEN"] = KOMARI_TOKEN
+                supervise_process("Komari-Agent", km_cmd, env=km_env)
+                logger.info("[Komari] 监控探针已启动 (已禁用远程 Web SSH 与自动更新)")
+        except Exception as err:
+            logger.warning(f"[Komari] 启动异常: {err}")
 
     while not is_shutting_down:
         time.sleep(1.0)

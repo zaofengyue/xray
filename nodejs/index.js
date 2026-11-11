@@ -125,11 +125,16 @@ function isContainerEnvironment() {
 
 function resolveCoreDir() {
   const home = process.env.HOME || (os.platform() === 'win32' ? process.env.USERPROFILE : '/root') || '.';
+  let uid = 0;
+  try {
+    if (typeof process.getuid === 'function') uid = process.getuid();
+    else if (os.userInfo) uid = os.userInfo().uid || 0;
+  } catch {}
   const candidates = [
     '/opt/xray-core',
     path.join(home, '.xray-core'),
     path.join(process.cwd(), '.xray-core'),
-    path.join(os.tmpdir(), `xray-core-${os.userInfo ? (os.userInfo().uid || 0) : 0}`)
+    path.join(os.tmpdir(), `xray-core-${uid}`)
   ];
 
   for (const dir of candidates) {
@@ -148,8 +153,11 @@ const HOME = process.env.HOME || (os.platform() === 'win32' ? process.env.USERPR
 const CORE_DIR = resolveCoreDir();
 process.env.XRAY_LOCATION_ASSET = CORE_DIR; // 确保 Xray 优先从核心目录载入 geoip.dat / geosite.dat
 
-const SUB_FILE          = path.join(process.cwd(), 'sub.txt');
+const SUB_FILE          = path.join(CORE_DIR, 'sub.txt');
 const UUID_FILE         = fs.existsSync(path.join(HOME, 'uuid.txt')) ? path.join(HOME, 'uuid.txt') : path.join(CORE_DIR, '.session.key');
+const SUB_TOKEN_FILE    = fs.existsSync(path.join(HOME, 'sub-token.txt')) ? path.join(HOME, 'sub-token.txt') : path.join(CORE_DIR, '.sub-token');
+const SS_PASS_FILE      = fs.existsSync(path.join(HOME, 'ss-pass.txt')) ? path.join(HOME, 'ss-pass.txt') : path.join(CORE_DIR, '.ss-pass');
+const S5_CREDS_FILE     = fs.existsSync(path.join(HOME, 's5-creds.json')) ? path.join(HOME, 's5-creds.json') : path.join(CORE_DIR, '.s5-creds.json');
 const CONFIG_FILE       = fs.existsSync(path.join(HOME, 'xray-config.json')) ? path.join(HOME, 'xray-config.json') : path.join(CORE_DIR, '.config.json');
 const REALITY_KEY_FILE  = fs.existsSync(path.join(HOME, 'reality-keys.json')) ? path.join(HOME, 'reality-keys.json') : path.join(CORE_DIR, '.reality-keys.json');
 
@@ -233,6 +241,67 @@ function getOrGenerateUUID() {
     secureFilePermissions(UUID_FILE);
   } catch {}
   return generated;
+}
+
+function getOrGenerateSubToken(presetToken) {
+  const custom = (presetToken || process.env.SUB_TOKEN || '').trim();
+  if (custom) return custom;
+  try {
+    if (fs.existsSync(SUB_TOKEN_FILE)) {
+      const saved = fs.readFileSync(SUB_TOKEN_FILE, 'utf8').trim();
+      if (saved) return saved;
+    }
+  } catch {}
+  const generated = crypto.randomBytes(16).toString('hex');
+  try {
+    fs.writeFileSync(SUB_TOKEN_FILE, generated, { mode: 0o600 });
+    secureFilePermissions(SUB_TOKEN_FILE);
+  } catch {}
+  return generated;
+}
+
+function getOrGenerateSSPass(presetPass) {
+  const custom = (presetPass || process.env.SS_PASS || '').trim();
+  if (custom) {
+    try {
+      const decoded = Buffer.from(custom, 'base64');
+      if (decoded.length === 16) return custom;
+      console.warn(`[SS] 自定义 SS_PASS base64 解码后为 ${decoded.length} 字节（必须为 16 字节），将自动生成标准密钥`);
+    } catch {}
+  }
+  try {
+    if (fs.existsSync(SS_PASS_FILE)) {
+      const saved = fs.readFileSync(SS_PASS_FILE, 'utf8').trim();
+      if (saved && Buffer.from(saved, 'base64').length === 16) return saved;
+    }
+  } catch {}
+  const generated = crypto.randomBytes(16).toString('base64');
+  try {
+    fs.writeFileSync(SS_PASS_FILE, generated, { mode: 0o600 });
+    secureFilePermissions(SS_PASS_FILE);
+  } catch {}
+  return generated;
+}
+
+function getOrGenerateS5Creds(presetUser, presetPass) {
+  let user = (presetUser || process.env.S5_USER || '').trim();
+  let pass = (presetPass || process.env.S5_PASS || '').trim();
+  if (user && pass) return { user, pass };
+
+  try {
+    if (fs.existsSync(S5_CREDS_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(S5_CREDS_FILE, 'utf8'));
+      if (saved.user && saved.pass) return saved;
+    }
+  } catch {}
+
+  user = user || ('u' + crypto.randomBytes(4).toString('hex'));
+  pass = pass || crypto.randomBytes(12).toString('base64url');
+  try {
+    fs.writeFileSync(S5_CREDS_FILE, JSON.stringify({ user, pass }, null, 2), { mode: 0o600 });
+    secureFilePermissions(S5_CREDS_FILE);
+  } catch {}
+  return { user, pass };
 }
 
 function timingSafeEqualStr(a, b) {
@@ -375,9 +444,34 @@ async function resolveBestRealityDomain(countryCode, userCustomDomain) {
 // ──────────────────────────────────────────────
 function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
+    const tmpPath = `${destPath}.tmp_${Date.now()}`;
+    let settled = false;
+
+    function cleanupTmp() {
+      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+    }
+    function fail(err) {
+      if (settled) return;
+      settled = true;
+      cleanupTmp();
+      reject(err);
+    }
+    function succeed() {
+      if (settled) return;
+      settled = true;
+      try {
+        if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+        fs.renameSync(tmpPath, destPath);
+        resolve(destPath);
+      } catch (e) {
+        cleanupTmp();
+        reject(e);
+      }
+    }
+
     function get(currentUrl, redirectCount) {
       if (redirectCount > maxRedirects) {
-        return reject(new Error(`超过最大重定向次数 (${maxRedirects})`));
+        return fail(new Error(`超过最大重定向次数 (${maxRedirects})`));
       }
       const client = currentUrl.startsWith('https:') ? https : http;
       const req = client.get(currentUrl, {
@@ -391,28 +485,23 @@ function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
         }
         if (res.statusCode !== 200) {
           res.resume();
-          return reject(new Error(`下载失败，HTTP 状态码: ${res.statusCode}`));
+          return fail(new Error(`下载失败，HTTP 状态码: ${res.statusCode}`));
         }
-        const fileStream = fs.createWriteStream(destPath);
+        const fileStream = fs.createWriteStream(tmpPath);
         res.pipe(fileStream);
         fileStream.on('finish', () => {
-          fileStream.close(() => resolve(destPath));
+          fileStream.close(() => succeed());
         });
-        fileStream.on('error', (err) => {
-          try { fs.unlinkSync(destPath); } catch {}
-          reject(err);
-        });
+        fileStream.on('error', (err) => fail(err));
+        res.on('error', (err) => fail(err));
+        res.on('aborted', () => fail(new Error('下载连接意外中断 (Aborted)')));
       });
 
       req.on('timeout', () => {
         req.destroy();
-        try { fs.unlinkSync(destPath); } catch {}
-        reject(new Error(`下载超时 (${timeoutMs}ms)`));
+        fail(new Error(`下载超时 (${timeoutMs}ms)`));
       });
-      req.on('error', (err) => {
-        try { fs.unlinkSync(destPath); } catch {}
-        reject(err);
-      });
+      req.on('error', (err) => fail(err));
     }
     get(url, 0);
   });
@@ -454,7 +543,7 @@ function extractZip(zipPath, targetDir) {
 function checkBinaryHealthy(binPath, versionArgs = ['version']) {
   if (!fs.existsSync(binPath)) return false;
   try {
-    const out = execFileSync(binPath, versionArgs, { encoding: 'utf8', stdio: 'pipe' });
+    const out = execFileSync(binPath, versionArgs, { encoding: 'utf8', stdio: 'pipe', timeout: 5000 });
     return !!(out && out.length > 0);
   } catch {
     return false;
@@ -567,16 +656,16 @@ async function prepareKomariAgent() {
   }
 
   const table = {
-    linux:  { x64: 'linux_amd64', arm64: 'linux_arm64', arm: 'linux_armv7' },
-    darwin: { x64: 'darwin_amd64', arm64: 'darwin_arm64' },
-    win32:  { x64: 'windows_amd64.exe' }
+    linux:  { x64: 'linux-amd64', arm64: 'linux-arm64', arm: 'linux-armv7' },
+    darwin: { x64: 'darwin-amd64', arm64: 'darwin-arm64' },
+    win32:  { x64: 'windows-amd64.exe' }
   };
   const suffix = table[os.platform()] && table[os.platform()][os.arch()];
   if (!suffix) return null;
 
   console.log('[Komari] 正在下载探针监控组件...');
-  const asset = `komari-agent_${suffix}`;
-  const url = `https://github.com/komari-monitoring/komari-agent/releases/latest/download/${asset}`;
+  const asset = `komari-agent-${suffix}`;
+  const url = `https://github.com/komari-monitor/komari-agent/releases/latest/download/${asset}`;
   try {
     await downloadBinary(url, KM_BIN_PATH, 20000);
     makeExecutable(KM_BIN_PATH);
@@ -594,15 +683,25 @@ function superviseProcess(tag, launcher) {
   let restartCount = 0;
   function start() {
     if (isShuttingDown) return;
-    const proc = launcher();
-    trackedProcesses.push(proc);
-    proc.on('exit', (code, sig) => {
-      if (isShuttingDown) return;
-      restartCount++;
-      const delay = Math.min(1000 * Math.pow(1.5, restartCount), 15000);
-      console.warn(`[进程守护] ${tag} 异常退出 (code: ${code}, sig: ${sig})，将在 ${(delay/1000).toFixed(1)}s 后自动拉起...`);
-      setTimeout(start, delay);
-    });
+    try {
+      const proc = launcher();
+      if (!proc) return;
+      trackedProcesses.push(proc);
+      proc.on('error', (err) => {
+        console.error(`[进程守护] ${tag} 进程执行异常: ${err.message}`);
+      });
+      proc.on('exit', (code, sig) => {
+        const idx = trackedProcesses.indexOf(proc);
+        if (idx !== -1) trackedProcesses.splice(idx, 1);
+        if (isShuttingDown) return;
+        restartCount++;
+        const delay = Math.min(1000 * Math.pow(1.5, restartCount), 15000);
+        console.warn(`[进程守护] ${tag} 异常退出 (code: ${code}, sig: ${sig})，将在 ${(delay/1000).toFixed(1)}s 后自动拉起...`);
+        setTimeout(start, delay);
+      });
+    } catch (err) {
+      console.error(`[进程守护] ${tag} 创建失败: ${err.message}`);
+    }
   }
   start();
 }
@@ -637,14 +736,16 @@ function getOrGenerateRealityKeys(xrayBin) {
   }
   if (!privKey || !pubKey) {
     try {
-      const out = execFileSync(xrayBin, ['x25519'], { encoding: 'utf8' });
-      const privMatch = out.match(/Private\s*key:\s*(\S+)/i);
-      const pubMatch  = out.match(/Public\s*key:\s*(\S+)/i);
+      const out = execFileSync(xrayBin, ['x25519'], { encoding: 'utf8', timeout: 5000 });
+      const privMatch = out.match(/(?:Private\s*key|PrivateKey)\s*:\s*(\S+)/i);
+      const pubMatch  = out.match(/(?:Password\s*\(PublicKey\)|Public\s*key|PublicKey|Password)\s*:\s*(\S+)/i);
       if (privMatch && pubMatch) {
         privKey = privMatch[1];
         pubKey  = pubMatch[1];
         fs.writeFileSync(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey }, null, 2), { mode: 0o600 });
         secureFilePermissions(REALITY_KEY_FILE);
+      } else {
+        console.warn(`[Reality] x25519 密钥解析未完全匹配 (输出: ${out.replace(/\s+/g, ' ').trim()})`);
       }
     } catch (e) {
       console.error(`[Reality] x25519 密钥生成失败: ${e.message}`);
@@ -677,7 +778,7 @@ async function main() {
   const UUID = getOrGenerateUUID();
   const TROJAN_PASS = UUID;
   const SUB_PATH = (PRESET_SUB || process.env.SUB || 'sub').trim().replace(/^\/+/, '');
-  const SUB_TOKEN = (PRESET_SUB_TOKEN || process.env.SUB_TOKEN || '').trim();
+  const SUB_TOKEN = getOrGenerateSubToken(PRESET_SUB_TOKEN);
   const INBOUND_PORT = parseInt(PRESET_PORT || process.env.PORT || '0', 10) || await findAvailablePort(3000);
   const ARGO_PORT = parseInt(PRESET_ARGO_PORT || process.env.ARGO_PORT || '8001', 10);
   const DISABLE_ARGO = (PRESET_DISABLE_ARGO || process.env.DISABLE_ARGO || '').toLowerCase() === 'true';
@@ -691,10 +792,11 @@ async function main() {
 
   const REALITY_PORT = (PRESET_REALITY_PORT || process.env.REALITY_PORT || '').trim();
   const SS_PORT = (PRESET_SS_PORT || process.env.SS_PORT || '').trim();
-  const SS_PASS = (PRESET_SS_PASS || process.env.SS_PASS || crypto.randomBytes(16).toString('base64')).trim();
+  const SS_PASS = getOrGenerateSSPass(PRESET_SS_PASS);
   const S5_PORT = (PRESET_S5_PORT || process.env.S5_PORT || '').trim();
-  const S5_USER = (PRESET_S5_USER || process.env.S5_USER || UUID.substring(0, 8)).trim();
-  const S5_PASS = (PRESET_S5_PASS || process.env.S5_PASS || UUID.slice(-12)).trim();
+  const s5Creds = getOrGenerateS5Creds(PRESET_S5_USER, PRESET_S5_PASS);
+  const S5_USER = s5Creds.user;
+  const S5_PASS = s5Creds.pass;
 
   const KOMARI_DOMAIN = (PRESET_KOMARI_DOMAIN || process.env.KOMARI_DOMAIN || '').trim();
   const KOMARI_TOKEN  = (PRESET_KOMARI_TOKEN  || process.env.KOMARI_TOKEN  || '').trim();
@@ -790,7 +892,7 @@ async function main() {
         settings: {
           clients: [{ id: UUID, flow: 'xtls-rprx-vision' }],
           decryption: 'none',
-          fallbacks: [{ dest: V_XHTTP_PORT, xver: 0 }]
+          ...(!DISABLE_ARGO ? { fallbacks: [{ dest: V_XHTTP_PORT, xver: 0 }] } : {})
         },
         streamSettings: {
           network: 'tcp',
@@ -887,7 +989,13 @@ async function main() {
   let currentArgoHost = ARGO_DOMAIN || 'your-domain.com';
 
   function handleHttp(req, res) {
-    const urlObj = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+    let urlObj;
+    try {
+      urlObj = new URL(req.url, 'http://127.0.0.1');
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      return res.end('Bad Request');
+    }
     const pathname = urlObj.pathname;
 
     // A. VLESS-xhttp (SplitHTTP) 流反向代理
@@ -903,9 +1011,17 @@ async function main() {
         proxyRes.pipe(res);
       });
       proxyReq.on('error', (err) => {
-        if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end(`Bad Gateway: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'text/plain' });
+          res.end(`Bad Gateway: ${err.message}`);
+        } else {
+          res.destroy();
+        }
       });
+      res.on('close', () => {
+        if (!res.writableEnded) proxyReq.destroy();
+      });
+      req.on('error', () => proxyReq.destroy());
       req.pipe(proxyReq);
       return;
     }
@@ -970,6 +1086,8 @@ async function main() {
 
   if (!DISABLE_ARGO) {
     const argoServer = http.createServer(handleHttp);
+    argoServer.requestTimeout = 0;
+    argoServer.headersTimeout = 0;
     argoServer.on('error', (e) => console.error(`[Argo] 内部服务异常: ${e.message}`));
     argoServer.on('upgrade', handleUpgrade);
 
@@ -981,6 +1099,8 @@ async function main() {
 
   // 6. 启动外部直连主 HTTP 服务 (挂载 Web、订阅、xhttp 及直连 WebSocket 支持)
   const mainServer = http.createServer(handleHttp);
+  mainServer.requestTimeout = 0;
+  mainServer.headersTimeout = 0;
   mainServer.on('error', (e) => console.error(`[HTTP] 主服务异常: ${e.message}`));
   mainServer.on('upgrade', handleUpgrade);
   mainServer.listen(INBOUND_PORT, '0.0.0.0', () => {
@@ -1120,18 +1240,24 @@ async function main() {
         if (ARGO_PROTOCOL) cfArgs.push('--protocol', ARGO_PROTOCOL);
         cfArgs.push('run');
 
+        let fixedNotified = false;
         superviseProcess('Cloudflared-Fixed', () => {
           const p = spawn(cfBin, cfArgs, {
             argv0: os.platform() !== 'win32' ? 'node /app/bridge.js' : undefined,
-            env: { ...process.env, TUNNEL_TOKEN: ARGO_AUTH }
+            env: { ...process.env, TUNNEL_TOKEN: ARGO_AUTH },
+            stdio: ['ignore', 'ignore', 'pipe']
           });
           p.stderr.on('data', (d) => {
             const line = d.toString();
             if (/Registered tunnel connection/i.test(line)) {
-              console.log('[Argo] 固定隧道已建立连接 (Registered tunnel connection)');
-              onTunnelReady(ARGO_DOMAIN);
+              if (!fixedNotified) {
+                fixedNotified = true;
+                console.log('[Argo] 固定隧道已建立连接 (Registered tunnel connection)');
+                onTunnelReady(ARGO_DOMAIN);
+              }
             }
           });
+          p.on('exit', () => { fixedNotified = false; });
           return p;
         });
       } else {
@@ -1142,7 +1268,8 @@ async function main() {
 
         superviseProcess('Cloudflared-Quick', () => {
           const p = spawn(cfBin, cfArgs, {
-            argv0: os.platform() !== 'win32' ? 'node /app/bridge.js' : undefined
+            argv0: os.platform() !== 'win32' ? 'node /app/bridge.js' : undefined,
+            stdio: ['ignore', 'ignore', 'pipe']
           });
           p.stderr.on('data', (d) => {
             const line = d.toString();
@@ -1173,14 +1300,17 @@ async function main() {
       const kmBin = await prepareKomariAgent();
       if (kmBin) {
         setupContainerUptime();
-        const kmArgs = ['-e', KOMARI_DOMAIN.replace(/^https?:\/\//, ''), '-t', KOMARI_TOKEN];
+        let kmEndpoint = KOMARI_DOMAIN.trim();
+        if (!/^https?:\/\//i.test(kmEndpoint)) kmEndpoint = `https://${kmEndpoint}`;
+        const kmArgs = ['--disable-web-ssh', '--disable-auto-update', '-e', kmEndpoint];
         superviseProcess('Komari-Agent', () => {
           return spawn(kmBin, kmArgs, {
             argv0: os.platform() !== 'win32' ? 'node /app/metrics.js' : undefined,
-            stdio: 'ignore'
+            stdio: 'ignore',
+            env: { ...process.env, AGENT_ENDPOINT: kmEndpoint, AGENT_TOKEN: KOMARI_TOKEN }
           });
         });
-        console.log('[Komari] 监控探针已启动');
+        console.log('[Komari] 监控探针已启动 (已禁用远程 Web SSH 与自动更新)');
       }
     } catch (err) {
       console.warn(`[Komari] 启动异常: ${err.message}`);
@@ -1199,10 +1329,14 @@ async function main() {
     if (!showLog) return;
 
     const subTokenQuery = SUB_TOKEN ? `?token=${encodeURIComponent(SUB_TOKEN)}` : '';
+    const primarySubUrl = (!DISABLE_ARGO && host)
+      ? `https://${host}/${SUB_PATH}${subTokenQuery}`
+      : `http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`;
+
     console.log('\n============================================================');
     console.log(`🚀 Xray 多功能综合穿透代理服务已就绪`);
     console.log(`📌 节点标识: ${NODE_NAME} (地区: ${geoCountry})`);
-    console.log(`🔗 外部订阅: http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`);
+    console.log(`🔗 外部订阅: ${primarySubUrl}`);
     if (!DISABLE_ARGO && host) console.log(`🛡️ Argo 域名: ${host}`);
     console.log('---------------- 节点订阅明细 ----------------');
     for (const link of list) {
@@ -1227,12 +1361,16 @@ async function main() {
     if (!token || !chatId) return;
 
     const subTokenQuery = SUB_TOKEN ? `?token=${encodeURIComponent(SUB_TOKEN)}` : '';
+    const primarySubUrl = (!DISABLE_ARGO && host)
+      ? `https://${host}/${SUB_PATH}${subTokenQuery}`
+      : `http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`;
+
     let text = `🎉 *Xray 节点部署成功通知*\n` +
-      `*节点*: \`${NODE_NAME}\`\n`;
+      `*节点*: \`${(NODE_NAME || 'xray').replace(/`/g, '')}\`\n`;
     if (!DISABLE_ARGO && host) {
       text += `*域名*: \`${host}\`\n`;
     }
-    text += `*订阅*: \`http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}\``;
+    text += `*订阅*: \`${primarySubUrl}\``;
 
     const payload = JSON.stringify({
       chat_id: chatId,

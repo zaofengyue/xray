@@ -31,7 +31,7 @@ RUN set -eux; \
     curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${CF_ARCH}" -o /opt/xray-core/bridge; \
     chmod +x /opt/xray-core/bridge; \
     # 下载 komari-agent 监控探针
-    curl -fsSL "https://github.com/komari-monitoring/komari-agent/releases/latest/download/komari-agent_${KM_ARCH}" -o /opt/xray-core/metrics || true; \
+    curl -fsSL "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-${KM_ARCH}" -o /opt/xray-core/metrics || true; \
     [ -f /opt/xray-core/metrics ] && chmod +x /opt/xray-core/metrics || true; \
     # 建立系统伪装软链接
     ln -sf /opt/xray-core/worker /usr/local/bin/worker; \
