@@ -125,8 +125,9 @@ function resolveCoreDir() {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       if (os.platform() !== 'win32') {
         const stat = fs.statSync(dir);
-        if (typeof process.getuid === 'function' && stat.uid !== uid) continue;
-        if ((stat.mode & 0o022) !== 0) {
+        const isPrebaked = (dir === '/opt/xray-core' && stat.uid === 0);
+        if (!isPrebaked && typeof process.getuid === 'function' && stat.uid !== uid) continue;
+        if (!isPrebaked && (stat.mode & 0o022) !== 0) {
           try { fs.chmodSync(dir, 0o700); } catch {}
           const reStat = fs.statSync(dir);
           if ((reStat.mode & 0o022) !== 0) continue;
@@ -141,9 +142,17 @@ function resolveCoreDir() {
   return path.join(os.tmpdir(), 'xray-core');
 }
 
+function resolveAssetDir(coreDir) {
+  if (fs.existsSync(path.join(coreDir, 'geoip.dat'))) return coreDir;
+  for (const ad of ['/opt/xray-core', path.join(process.cwd(), 'bin'), '/usr/local/share/xray']) {
+    if (fs.existsSync(path.join(ad, 'geoip.dat'))) return ad;
+  }
+  return coreDir;
+}
+
 const HOME = process.env.HOME || (os.platform() === 'win32' ? process.env.USERPROFILE : '/root') || '.';
 const CORE_DIR = resolveCoreDir();
-process.env.XRAY_LOCATION_ASSET = CORE_DIR; // 确保 Xray 优先从核心目录载入 geoip.dat / geosite.dat
+process.env.XRAY_LOCATION_ASSET = resolveAssetDir(CORE_DIR); // 确保在非 root 降级目录时依然能正确载入 geoip.dat / geosite.dat
 
 const SUB_FILE          = path.join(CORE_DIR, 'sub.txt');
 const UUID_FILE         = fs.existsSync(path.join(HOME, 'uuid.txt')) ? path.join(HOME, 'uuid.txt') : path.join(CORE_DIR, '.session.key');
@@ -204,7 +213,7 @@ function killStalePids() {
       for (const p of pids) {
         const pid = parseInt(p, 10);
         if (pid && !isNaN(pid)) {
-          let shouldKill = true;
+          let shouldKill = false;
           // Linux 下校验 /proc/<pid>/cmdline，避免 PID 复用误杀无关系统进程
           if (os.platform() === 'linux') {
             try {
@@ -942,12 +951,17 @@ async function main() {
   try {
     const htmlPaths = [
       path.join(__dirname, 'index.html'),
-      path.join(process.cwd(), 'index.html'),
-      path.join(CORE_DIR, 'index.html')
+      path.join(CORE_DIR, 'index.html'),
+      path.join(process.cwd(), 'index.html')
     ];
     for (const hp of htmlPaths) {
       if (fs.existsSync(hp)) {
-        global.CAMOUFLAGE_HTML = fs.readFileSync(hp, 'utf8');
+        const content = fs.readFileSync(hp, 'utf8');
+        // 严格防泄露保护：绝不将管理部署面板（包含配置生成控件）作为对外 Web 伪装页使用
+        if (content.includes('Xray 部署面板') || content.includes('id="field-uuid"')) {
+          continue;
+        }
+        global.CAMOUFLAGE_HTML = content;
         break;
       }
     }
@@ -1405,7 +1419,7 @@ async function main() {
             fingerprint: 'chrome',
             show: false,
             publicKey: global.REALITY_PUB_KEY,
-            shortId: '',
+            shortId: global.REALITY_SHORT_ID || '',
             spiderX: ''
           },
           xhttpSettings: {

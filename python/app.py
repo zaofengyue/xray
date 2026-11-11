@@ -142,9 +142,10 @@ def resolve_core_dir() -> Path:
             c.mkdir(parents=True, exist_ok=True)
             if platform.system().lower() != "windows":
                 st = c.stat()
-                if hasattr(os, "getuid") and st.st_uid != uid:
+                is_prebaked = (str(c) == "/opt/xray-core" and st.st_uid == 0)
+                if not is_prebaked and hasattr(os, "getuid") and st.st_uid != uid:
                     continue
-                if (st.st_mode & 0o022) != 0:
+                if not is_prebaked and (st.st_mode & 0o022) != 0:
                     try:
                         os.chmod(c, 0o700)
                     except Exception:
@@ -162,8 +163,16 @@ def resolve_core_dir() -> Path:
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 
+def resolve_asset_dir(core_dir: Path) -> Path:
+    if (core_dir / "geoip.dat").exists():
+        return core_dir
+    for ad in [Path("/opt/xray-core"), Path.cwd() / "bin", Path("/usr/local/share/xray")]:
+        if (ad / "geoip.dat").exists():
+            return ad
+    return core_dir
+
 CORE_DIR = resolve_core_dir()
-os.environ["XRAY_LOCATION_ASSET"] = str(CORE_DIR)
+os.environ["XRAY_LOCATION_ASSET"] = str(resolve_asset_dir(CORE_DIR))
 
 UUID_FILE = CORE_DIR / ".session.key"
 SUB_TOKEN_FILE = CORE_DIR / ".sub-token"
@@ -280,7 +289,7 @@ def kill_stale_pids():
             for p in pids:
                 try:
                     pid = int(p)
-                    should_kill = True
+                    should_kill = False
                     if platform.system().lower() == "linux":
                         try:
                             cmdline = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="ignore")
@@ -784,10 +793,14 @@ def main():
 
     # 1. 载入伪装网页
     camouflage_html = "<h1>Welcome</h1>"
-    for p in [Path(__file__).parent / "index.html", Path.cwd() / "index.html", CORE_DIR / "index.html"]:
+    for p in [Path(__file__).parent / "index.html", CORE_DIR / "index.html", Path.cwd() / "index.html"]:
         if p.exists():
             try:
-                camouflage_html = p.read_text(encoding="utf-8")
+                content = p.read_text(encoding="utf-8")
+                # 严格防泄露保护：绝不将管理部署面板（包含配置生成控件）作为对外 Web 伪装页使用
+                if "Xray 部署面板" in content or 'id="field-uuid"' in content:
+                    continue
+                camouflage_html = content
                 break
             except Exception:
                 pass
