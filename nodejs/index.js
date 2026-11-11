@@ -388,10 +388,8 @@ function timingSafeEqualStr(a, b) {
 
 function checkIpv6Supported() {
   try {
-    const s = net.createServer();
-    s.listen(0, '::1');
-    s.close();
-    return true;
+    return Object.values(os.networkInterfaces()).flat()
+      .some(i => i && (i.family === 'IPv6' || i.family === 6) && i.internal);
   } catch {
     return false;
   }
@@ -996,6 +994,13 @@ async function main() {
     portMap.set(port, name);
   }
 
+  let IDLE_TIMEOUT_SEC = 300;
+  try {
+    const parsed = parseInt(process.env.IDLE_TIMEOUT || '300', 10);
+    if (!isNaN(parsed)) IDLE_TIMEOUT_SEC = parsed;
+  } catch {}
+  const IDLE_TIMEOUT_MS = IDLE_TIMEOUT_SEC > 0 ? IDLE_TIMEOUT_SEC * 1000 : 0;
+
   const KOMARI_DOMAIN = (PRESET_KOMARI_DOMAIN || process.env.KOMARI_DOMAIN || '').trim();
   const KOMARI_TOKEN  = (PRESET_KOMARI_TOKEN  || process.env.KOMARI_TOKEN  || '').trim();
 
@@ -1251,14 +1256,16 @@ async function main() {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           proxyRes.pipe(res);
         });
-        proxyReq.setTimeout(300000, () => {
-          proxyReq.destroy();
-          res.destroy();
-        });
-        req.setTimeout(300000, () => {
-          req.destroy();
-          proxyReq.destroy();
-        });
+        if (IDLE_TIMEOUT_MS > 0) {
+          proxyReq.setTimeout(IDLE_TIMEOUT_MS, () => {
+            proxyReq.destroy();
+            res.destroy();
+          });
+          req.setTimeout(IDLE_TIMEOUT_MS, () => {
+            req.destroy();
+            proxyReq.destroy();
+          });
+        }
         proxyReq.on('error', (err) => {
           if (!res.headersSent) {
             res.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -1334,10 +1341,12 @@ async function main() {
       proxy.pipe(socket);
     });
 
-    socket.setTimeout(300000);
-    socket.on('timeout', () => socket.destroy());
-    proxy.setTimeout(300000);
-    proxy.on('timeout', () => proxy.destroy());
+    if (IDLE_TIMEOUT_MS > 0) {
+      socket.setTimeout(IDLE_TIMEOUT_MS);
+      socket.on('timeout', () => socket.destroy());
+      proxy.setTimeout(IDLE_TIMEOUT_MS);
+      proxy.on('timeout', () => proxy.destroy());
+    }
 
     proxy.on('error', () => socket.destroy());
     socket.on('error', () => proxy.destroy());
