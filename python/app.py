@@ -183,16 +183,39 @@ def secure_permissions(p: Path):
             pass
 
 def secure_write_text(p: Path, content: str):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = p.with_name(f"{p.name}.tmp.{int(time.time()*1000)}_{os.getpid()}")
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
         if platform.system().lower() != "windows":
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-            fd = os.open(p, flags, 0o600)
-            with open(fd, "w", encoding="utf-8") as f:
-                f.write(content)
+            fd = os.open(tmp_path, flags, 0o600)
+            try:
+                try:
+                    os.fchmod(fd, 0o600)
+                except Exception:
+                    pass
+                with open(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                    f.flush()
+                    try:
+                        os.fsync(fd)
+                    except Exception:
+                        pass
+            except Exception:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                raise
         else:
-            p.write_text(content, encoding="utf-8")
+            tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(p)
+        secure_permissions(p)
     except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         p.write_text(content, encoding="utf-8")
         secure_permissions(p)
 

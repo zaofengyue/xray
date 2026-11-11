@@ -154,6 +154,28 @@ const CONFIG_FILE       = path.join(CORE_DIR, '.config.json');
 const REALITY_KEY_FILE  = fs.existsSync(path.join(HOME, 'reality-keys.json')) ? path.join(HOME, 'reality-keys.json') : path.join(CORE_DIR, '.reality-keys.json');
 const PID_FILE          = path.join(CORE_DIR, '.pids');
 
+function secureFilePermissions(filePath) {
+  try {
+    if (os.platform() !== 'win32') fs.chmodSync(filePath, 0o600);
+  } catch {}
+}
+
+function secureWriteText(filePath, content) {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = path.join(dir, `${path.basename(filePath)}.tmp.${Date.now()}_${process.pid}`);
+  try {
+    fs.writeFileSync(tmpPath, content, { mode: 0o600, encoding: 'utf-8' });
+    secureFilePermissions(tmpPath);
+    fs.renameSync(tmpPath, filePath);
+    secureFilePermissions(filePath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    fs.writeFileSync(filePath, content, { mode: 0o600, encoding: 'utf-8' });
+    secureFilePermissions(filePath);
+  }
+}
+
 function recordPid(pid) {
   try {
     let pids = [];
@@ -162,8 +184,7 @@ function recordPid(pid) {
     }
     if (!pids.includes(String(pid))) {
       pids.push(String(pid));
-      fs.writeFileSync(PID_FILE, pids.join('\n'), { mode: 0o600 });
-      secureFilePermissions(PID_FILE);
+      secureWriteText(PID_FILE, pids.join('\n'));
     }
   } catch {}
 }
@@ -172,8 +193,7 @@ function removePid(pid) {
   try {
     if (fs.existsSync(PID_FILE)) {
       const pids = fs.readFileSync(PID_FILE, 'utf8').split('\n').map(x => x.trim()).filter(p => p && p !== String(pid));
-      fs.writeFileSync(PID_FILE, pids.join('\n'), { mode: 0o600 });
-      secureFilePermissions(PID_FILE);
+      secureWriteText(PID_FILE, pids.join('\n'));
     }
   } catch {}
 }
@@ -273,12 +293,6 @@ function getSafeChildEnv(extra = {}) {
 // ──────────────────────────────────────────────
 // 工具函数库
 // ──────────────────────────────────────────────
-function secureFilePermissions(filePath) {
-  try {
-    if (os.platform() !== 'win32') fs.chmodSync(filePath, 0o600);
-  } catch {}
-}
-
 function makeExecutable(filePath) {
   try {
     if (os.platform() !== 'win32') fs.chmodSync(filePath, 0o755);
@@ -302,8 +316,7 @@ function getOrGenerateUUID() {
   } catch {}
   const generated = crypto.randomUUID();
   try {
-    fs.writeFileSync(UUID_FILE, generated, { mode: 0o600 });
-    secureFilePermissions(UUID_FILE);
+    secureWriteText(UUID_FILE, generated);
   } catch {}
   return generated;
 }
@@ -319,8 +332,7 @@ function getOrGenerateSubToken(presetToken) {
   } catch {}
   const generated = crypto.randomBytes(16).toString('hex');
   try {
-    fs.writeFileSync(SUB_TOKEN_FILE, generated, { mode: 0o600 });
-    secureFilePermissions(SUB_TOKEN_FILE);
+    secureWriteText(SUB_TOKEN_FILE, generated);
   } catch {}
   return generated;
 }
@@ -342,8 +354,7 @@ function getOrGenerateSSPass(presetPass) {
   } catch {}
   const generated = crypto.randomBytes(16).toString('base64');
   try {
-    fs.writeFileSync(SS_PASS_FILE, generated, { mode: 0o600 });
-    secureFilePermissions(SS_PASS_FILE);
+    secureWriteText(SS_PASS_FILE, generated);
   } catch {}
   return generated;
 }
@@ -363,8 +374,7 @@ function getOrGenerateS5Creds(presetUser, presetPass) {
   user = user || ('u' + crypto.randomBytes(4).toString('hex'));
   pass = pass || crypto.randomBytes(12).toString('base64url');
   try {
-    fs.writeFileSync(S5_CREDS_FILE, JSON.stringify({ user, pass }, null, 2), { mode: 0o600 });
-    secureFilePermissions(S5_CREDS_FILE);
+    secureWriteText(S5_CREDS_FILE, JSON.stringify({ user, pass }, null, 2));
   } catch {}
   return { user, pass };
 }
@@ -909,8 +919,7 @@ function getOrGenerateRealityKeys(xrayBin) {
       if (privMatch && pubMatch) {
         privKey = privMatch[1];
         pubKey  = pubMatch[1];
-        fs.writeFileSync(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey, shortId }, null, 2), { mode: 0o600 });
-        secureFilePermissions(REALITY_KEY_FILE);
+        secureWriteText(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey, shortId }, null, 2));
       } else {
         console.warn(`[Reality] x25519 密钥解析未完全匹配 (输出: ${out.replace(/\s+/g, ' ').trim()})`);
       }
@@ -920,8 +929,7 @@ function getOrGenerateRealityKeys(xrayBin) {
   } else {
     // 确保已存在密钥时 shortId 也能被持久化保存
     try {
-      fs.writeFileSync(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey, shortId }, null, 2), { mode: 0o600 });
-      secureFilePermissions(REALITY_KEY_FILE);
+      secureWriteText(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey, shortId }, null, 2));
     } catch {}
   }
   return { privKey, pubKey, shortId };
@@ -1180,8 +1188,7 @@ async function main() {
     ]
   };
 
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(xrayConfig, null, 2), { mode: 0o600 });
-  secureFilePermissions(CONFIG_FILE);
+  secureWriteText(CONFIG_FILE, JSON.stringify(xrayConfig, null, 2));
 
   // 校验 Xray 配置文件合法性
   try {
@@ -1468,8 +1475,7 @@ async function main() {
       const b64 = Buffer.from(list.join('\n')).toString('base64');
       global.SUB_CONTENT = b64;
       try {
-        fs.writeFileSync(SUB_FILE, b64, { mode: 0o600 });
-        secureFilePermissions(SUB_FILE);
+        secureWriteText(SUB_FILE, b64);
       } catch {}
       return { b64, list };
     }
