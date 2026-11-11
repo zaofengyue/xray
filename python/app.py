@@ -7,7 +7,7 @@
 # ── 1. 基础配置 ──
 CONF_UUID           = ""  # 服务 UUID（留空自动生成标准 UUID）
 CONF_PORT           = ""  # HTTP 外部服务端口（默认自动搜寻可用端口，如 3000）
-CONF_NAME           = ""  # 节点名称前缀（留空自动识别 IP 所在国家与组织，非阻塞）
+CONF_NAME           = ""  # 节点名称前缀（留空自动识别 IP 所在国家与组织，最长等待 3s 保障 Reality 伪装匹配）
 CONF_IP             = ""  # 自定义公网 IP（留空自动探测）
 CONF_SUB            = ""  # 订阅路径后缀（默认 "sub"，即 /sub）
 CONF_SUB_TOKEN      = ""  # 订阅安全访问令牌 Token（留空自动生成随机 Token 并持久化，访问需带 ?token=xxx）
@@ -15,10 +15,10 @@ CONF_SUB_TOKEN      = ""  # 订阅安全访问令牌 Token（留空自动生成�
 # ── 2. Argo 隧道配置 ──
 CONF_DISABLE_ARGO      = ""  # 填 "true" 禁用 Argo，留空则启用
 CONF_ARGO_DOMAIN       = ""  # 固定隧道域名（留空使用临时 Quick Tunnel）
-CONF_ARGO_AUTH         = ""  # 固定隧道 Token / 凭证
+CONF_ARGO_AUTH         = ""  # 固定隧道 Token
 CONF_ARGO_PORT         = ""  # Argo 内部聚合分流端口（默认 8001）
 CONF_ARGO_PROTOCOL     = ""  # Argo 隧道协议（默认留空走高速 QUIC 链路，可选 "http2"、"quic"）
-CONF_CF_PREFER_HOST    = ""  # Cloudflare 优选域名/IP（留空自动从优选池中选择）
+CONF_CF_PREFER_HOST    = ""  # Cloudflare 优选域名/IP（留空默认使用内置优选池首选节点）
 
 # ── 3. xhttp 进阶配置（上下行分离）──
 CONF_XHTTP_DOWN_MODE   = ""  # 下行策略: 留空默认同源走 Cloudflare，'reality' 下行复用 Reality，'cdn' 下行第三方 CDN (如 AWS CloudFront)
@@ -145,15 +145,28 @@ def is_container_environment() -> bool:
 
 def resolve_core_dir() -> Path:
     home = Path(os.environ.get("HOME") or (os.environ.get("USERPROFILE") if platform.system().lower() == "windows" else "/root") or ".")
+    uid = os.getuid() if hasattr(os, "getuid") else 0
     candidates = [
         Path("/opt/xray-core"),
         home / ".xray-core",
         Path.cwd() / ".xray-core",
-        Path(f"/tmp/xray-core-{os.getuid() if hasattr(os, 'getuid') else 0}")
+        Path(f"/tmp/xray-core-{uid}")
     ]
     for c in candidates:
         try:
             c.mkdir(parents=True, exist_ok=True)
+            if platform.system().lower() != "windows":
+                st = c.stat()
+                if hasattr(os, "getuid") and st.st_uid != uid:
+                    continue
+                if (st.st_mode & 0o022) != 0:
+                    try:
+                        os.chmod(c, 0o700)
+                    except Exception:
+                        pass
+                    re_st = c.stat()
+                    if (re_st.st_mode & 0o022) != 0:
+                        continue
             test_file = c / f".test_{int(time.time()*1000)}"
             test_file.write_text("ok", encoding="utf-8")
             test_file.unlink(missing_ok=True)
@@ -203,9 +216,28 @@ GEO_REALITY_DOMAINS = {
   'HK': ['www.hkt.com', 'www.hkix.net'],
   'SG': ['www.starhub.com', 'www.myrepublic.net'],
   'US': ['gateway.icloud.com', 'dl.fedoraproject.org'],
+  'DE': ['www.ovh.com', 'debian.mirror.liteserver.nl'],
+  'NL': ['debian.mirror.liteserver.nl', 'www.ovh.com'],
+  'FR': ['www.ovh.com', 'debian.mirror.liteserver.nl'],
+  'GB': ['www.ovh.com', 'gateway.icloud.com'],
   'EU': ['www.ovh.com', 'debian.mirror.liteserver.nl'],
   'DEFAULT': ['www.iij.ad.jp', 'gateway.icloud.com']
 }
+
+def get_safe_env(extra: dict = None) -> dict:
+    allowed_keys = {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL",
+        "TMPDIR", "TEMP", "TMP",
+        "SYSTEMROOT", "WINDIR", "APPDATA", "LOCALAPPDATA", "COMSPEC", "PATHEXT",
+        "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+        "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy"
+    }
+    safe = {k: v for k, v in os.environ.items() if k in allowed_keys}
+    if extra:
+        safe.update(extra)
+    return safe
 
 # ──────────────────────────────────────────────
 # 工具函数
@@ -387,11 +419,18 @@ def resolve_reality_domain(country: str, custom_domain: str) -> str:
 # ──────────────────────────────────────────────
 # 二进制下载与解压
 # ──────────────────────────────────────────────
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if req.get_full_url().startswith("https:") and newurl.startswith("http:"):
+            raise urllib.error.HTTPError(req.full_url, code, "禁止从 HTTPS 降级到 HTTP 重定向 (Insecure redirect)", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
 def download_file(url: str, dest: Path, timeout: float = 30.0):
     tmp_dest = dest.with_name(f"{dest.name}.tmp_{int(time.time()*1000)}")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        opener = urllib.request.build_opener(SafeRedirectHandler)
+        with opener.open(req, timeout=timeout) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"下载失败: HTTP {resp.status}")
             with open(tmp_dest, "wb") as f:
@@ -519,15 +558,18 @@ def supervise_process(tag: str, cmd: list, env: dict = None):
         restart_count = 0
         while not is_shutting_down:
             proc = None
+            start_t = time.time()
             try:
                 proc = subprocess.Popen(
                     cmd,
-                    env=env or os.environ.copy(),
+                    env=env or get_safe_env(),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
                 tracked_subprocesses.append(proc)
                 proc.wait()
+                if time.time() - start_t > 30.0:
+                    restart_count = 0
             except Exception as e:
                 logger.warning(f"[{tag}] 启动异常: {e}")
             finally:
@@ -627,6 +669,22 @@ def main():
     S5_PORT = (CONF_S5_PORT or os.environ.get("S5_PORT", "")).strip()
     S5_USER, S5_PASS = get_or_generate_s5_creds(CONF_S5_USER, CONF_S5_PASS)
 
+    # 端口防冲突检查
+    configured_ports = [
+        ("PORT", INBOUND_PORT),
+        ("ARGO_PORT", ARGO_PORT),
+        ("REALITY_PORT", int(REALITY_PORT) if REALITY_PORT and REALITY_PORT.isdigit() else 0),
+        ("SS_PORT", int(SS_PORT) if SS_PORT and SS_PORT.isdigit() else 0),
+        ("S5_PORT", int(S5_PORT) if S5_PORT and S5_PORT.isdigit() else 0),
+    ]
+    seen_ports = {}
+    for name, p in configured_ports:
+        if p > 0:
+            if p in seen_ports:
+                logger.error(f"[配置致命错误] 端口配置冲突: {name} 与 {seen_ports[p]} 同时使用了端口 {p}")
+                sys.exit(1)
+            seen_ports[p] = name
+
     KOMARI_DOMAIN = (CONF_KOMARI_DOMAIN or os.environ.get("KOMARI_DOMAIN", "")).strip()
     KOMARI_TOKEN  = (CONF_KOMARI_TOKEN  or os.environ.get("KOMARI_TOKEN", "")).strip()
 
@@ -636,7 +694,7 @@ def main():
     # 3. 异步探测公网 IP 与地理位置
     geo_country = "DEFAULT"
     PUBLIC_IP = (CONF_IP or os.environ.get("PUBLIC_IP") or os.environ.get("IP", "")).strip()
-    NODE_NAME = (CONF_NAME or os.environ.get("NAME", "")).strip()
+    NODE_NAME = (CONF_NAME or os.environ.get("NODE_NAME") or (os.environ.get("NAME") if not os.environ.get("WSL_DISTRO_NAME") else "") or "").strip()
 
     def probe_geo():
         nonlocal PUBLIC_IP, geo_country, NODE_NAME
@@ -670,7 +728,8 @@ def main():
         except Exception:
             pass
         if not NODE_NAME:
-            NODE_NAME = geo_country if geo_country != "DEFAULT" else "xray"
+            valid_c = geo_country if geo_country != "DEFAULT" else ""
+            NODE_NAME = valid_c or "xray"
 
     geo_thread = threading.Thread(target=probe_geo, daemon=True)
     geo_thread.start()
@@ -719,12 +778,14 @@ def main():
 
     reality_domain = ""
     reality_pub_key = ""
+    reality_short_id = ""
     if REALITY_PORT and REALITY_PORT.isdigit():
         priv_k, pub_k = get_reality_keys(xray_bin)
         if priv_k and pub_k:
             reality_pub_key = pub_k
+            reality_short_id = os.urandom(4).hex()
             reality_domain = resolve_reality_domain(geo_country, CONF_REALITY_DOMAIN or os.environ.get("REALITY_DOMAIN", ""))
-            logger.info(f"[Reality] 启用 VLESS-Reality (Vision)，端口 {REALITY_PORT}，伪装站点: {reality_domain}")
+            logger.info(f"[Reality] 启用 VLESS-Reality (Vision)，端口 {REALITY_PORT}，伪装站点: {reality_domain}，shortId: {reality_short_id}")
             has_xhttp = any(ib.get("tag") == "vless-xhttp-in" for ib in inbounds)
             inbounds.append({
                 "tag": "reality-in",
@@ -745,7 +806,7 @@ def main():
                         "xver": 0,
                         "serverNames": [reality_domain],
                         "privateKey": priv_k,
-                        "shortIds": [""]
+                        "shortIds": [reality_short_id, ""]
                     }
                 },
                 "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}
@@ -775,12 +836,23 @@ def main():
             "settings": {
                 "auth": "password",
                 "accounts": [{"user": S5_USER, "pass": S5_PASS}],
-                "udp": True
+                "udp": True,
+                **({"ip": PUBLIC_IP} if PUBLIC_IP else {})
             }
         })
 
     xray_conf = {
         "log": {"loglevel": "warning"},
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                {
+                    "type": "field",
+                    "outboundTag": "block",
+                    "ip": ["geoip:private"]
+                }
+            ]
+        },
         "inbounds": inbounds,
         "outbounds": [
             {"protocol": "freedom", "tag": "direct"},
@@ -800,7 +872,7 @@ def main():
         sys.exit(1)
 
     # 启动 Xray
-    supervise_process("Xray-core", [str(xray_bin), "run", "-config", str(CONFIG_FILE)])
+    supervise_process("Xray-core", [str(xray_bin), "run", "-config", str(CONFIG_FILE)], env=get_safe_env({"XRAY_LOCATION_ASSET": str(CORE_DIR)}))
 
     if not DISABLE_ARGO:
         for p in [V_VMESS_PORT, V_VLESS_PORT, V_TROJAN_PORT, V_XHTTP_PORT]:
@@ -808,7 +880,7 @@ def main():
 
     # 5. Argo 多协议复用反向代理服务
     sub_content_holder = [""]
-    current_argo_host = [ARGO_DOMAIN or "your-domain.com"]
+    current_argo_host = [ARGO_DOMAIN or ""]
 
     def build_subscription(prefer_h: str, cur_h: str):
         name = NODE_NAME or "xray"
@@ -836,7 +908,7 @@ def main():
                         "fingerprint": "chrome",
                         "show": False,
                         "publicKey": reality_pub_key,
-                        "shortId": "",
+                        "shortId": reality_short_id or "",
                         "spiderX": ""
                     },
                     "xhttpSettings": {
@@ -875,7 +947,7 @@ def main():
             }
             xh_extra_param = f"&extra={urllib.parse.quote(json.dumps(extra_obj))}"
 
-        if not DISABLE_ARGO:
+        if not DISABLE_ARGO and cur_h:
             links.append(f"vless://{UUID}@{prefer_h}:443?encryption=none&security=tls&type=xhttp&host={cur_h}&path={urllib.parse.quote(XHTTP_PATH_VLESS)}&mode=packet-up&sni={cur_h}{xh_extra_param}#{urllib.parse.quote(name + '-VLESS-xhttp')}")
             links.append(f"vless://{UUID}@{prefer_h}:443?encryption=none&security=tls&type=ws&host={cur_h}&path={urllib.parse.quote(WS_PATH_VLESS)}&sni={cur_h}#{urllib.parse.quote(name + '-VLESS-WS')}")
             vmess_d = {
@@ -887,24 +959,27 @@ def main():
             links.append(f"trojan://{TROJAN_PASS}@{prefer_h}:443?security=tls&type=ws&host={cur_h}&path={urllib.parse.quote(WS_PATH_TROJAN)}&sni={cur_h}#{urllib.parse.quote(name + '-Trojan-WS')}")
 
         if REALITY_PORT and reality_pub_key and fmt_ip:
-            links.append(f"vless://{UUID}@{fmt_ip}:{REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={reality_domain}&fp=chrome&pbk={reality_pub_key}&type=tcp#{urllib.parse.quote(name + '-Reality')}")
+            sid_param = f"&sid={reality_short_id}" if reality_short_id else ""
+            links.append(f"vless://{UUID}@{fmt_ip}:{REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={reality_domain}&fp=chrome&pbk={reality_pub_key}{sid_param}&type=tcp#{urllib.parse.quote(name + '-Reality')}")
 
         if SS_PORT and fmt_ip:
-            u_info = base64.b64encode(f"2022-blake3-aes-128-gcm:{SS_PASS}".encode("utf-8")).decode("utf-8")
+            u_info = base64.urlsafe_b64encode(f"2022-blake3-aes-128-gcm:{SS_PASS}".encode("utf-8")).decode("utf-8").rstrip("=")
             links.append(f"ss://{u_info}@{fmt_ip}:{SS_PORT}#{urllib.parse.quote(name + '-SS2022')}")
 
         if S5_PORT and fmt_ip:
-            s5_info = base64.b64encode(f"{S5_USER}:{S5_PASS}".encode("utf-8")).decode("utf-8")
+            s5_info = base64.urlsafe_b64encode(f"{S5_USER}:{S5_PASS}".encode("utf-8")).decode("utf-8").rstrip("=")
             links.append(f"socks://{s5_info}@{fmt_ip}:{S5_PORT}#{urllib.parse.quote(name + '-Socks5')}")
 
-        b64 = base64.b64encode("\n".join(links).encode("utf-8")).decode("utf-8")
-        sub_content_holder[0] = b64
-        try:
-            SUB_FILE.write_text(b64, encoding="utf-8")
-            secure_permissions(SUB_FILE)
-        except Exception:
-            pass
-        return links, b64
+        if links:
+            b64 = base64.b64encode("\n".join(links).encode("utf-8")).decode("utf-8")
+            sub_content_holder[0] = b64
+            try:
+                SUB_FILE.write_text(b64, encoding="utf-8")
+                secure_permissions(SUB_FILE)
+            except Exception:
+                pass
+            return links, b64
+        return [], ""
 
     # 内部分流 HTTP / WS Server (多路复用网关)
     class MultiProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -939,11 +1014,17 @@ def main():
                     query_params = urllib.parse.parse_qs(parsed.query)
                     token_val = query_params.get("token", [""])[0]
                     if not hmac.compare_digest(token_val, SUB_TOKEN):
-                        self.send_response(403)
+                        self.send_response(404)
                         self.send_header("Content-Type", "text/plain; charset=utf-8")
                         self.end_headers()
-                        self.wfile.write(b"Forbidden: Invalid Subscription Token")
+                        self.wfile.write(b"Not Found")
                         return
+                if not sub_content_holder[0]:
+                    self.send_response(503)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"Tunnel initializing, please retry in 5 seconds...")
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache, no-store")
@@ -1069,9 +1150,12 @@ def main():
     main_server = ThreadedTCPServer(("0.0.0.0", INBOUND_PORT), MultiProxyHandler)
     threading.Thread(target=main_server.serve_forever, daemon=True).start()
     logger.info(f"[HTTP] Web 伪装站与订阅服务运行于 http://0.0.0.0:{INBOUND_PORT}")
+    if DISABLE_ARGO:
+        logger.warning("[安全提醒] DISABLE_ARGO 模式下主端口为明文 HTTP，若向公网暴露，建议配置反代或 TLS 证书")
 
     prefer_host = CONF_CF_PREFER_HOST or os.environ.get("CF_PREFER_HOST", CF_PREFER_HOST_CANDIDATES[0])
-    links, _ = build_subscription(prefer_host, current_argo_host[0])
+    if current_argo_host[0] or DISABLE_ARGO:
+        build_subscription(prefer_host, current_argo_host[0])
 
     def send_telegram_notice(h: str, cur_links: list):
         token = (CONF_TG_BOT_TOKEN or os.environ.get("TG_BOT_TOKEN", "")).strip()
@@ -1130,8 +1214,9 @@ def main():
                 def delayed_clear():
                     time.sleep(clear_min * 60)
                     try:
-                        os.system("cls" if os.name == "nt" else "clear")
-                        print("[安全自洁] 控制台敏感节点信息已自动清空。")
+                        if sys.stdout.isatty():
+                            os.system("cls" if os.name == "nt" else "clear")
+                            print("[安全自洁] 控制台敏感节点信息已自动清空。")
                     except Exception:
                         pass
                 threading.Thread(target=delayed_clear, daemon=True).start()
@@ -1148,8 +1233,7 @@ def main():
                 if ARGO_PROTOCOL:
                     cmd.extend(["--protocol", ARGO_PROTOCOL])
                 cmd.append("run")
-                env = os.environ.copy()
-                env["TUNNEL_TOKEN"] = ARGO_AUTH
+                env = get_safe_env({"TUNNEL_TOKEN": ARGO_AUTH})
                 def cf_runner():
                     fixed_notified = False
                     while not is_shutting_down:
@@ -1185,7 +1269,7 @@ def main():
                             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
                             tracked_subprocesses.append(proc)
                             for line in proc.stderr:
-                                m = re.search(r"https://([a-zA-Z0-9-]+\.trycloudflare\.com)", line)
+                                m = re.search(r"https://(?!api\.)([a-zA-Z0-9-]+\.trycloudflare\.com)", line, re.I)
                                 if m:
                                     nh = m.group(1)
                                     if nh != current_argo_host[0]:
@@ -1216,9 +1300,7 @@ def main():
                 if not re.match(r"^https?://", km_endpoint, re.I):
                     km_endpoint = f"https://{km_endpoint}"
                 km_cmd = [str(km_bin), "--disable-web-ssh", "--disable-auto-update", "-e", km_endpoint]
-                km_env = os.environ.copy()
-                km_env["AGENT_ENDPOINT"] = km_endpoint
-                km_env["AGENT_TOKEN"] = KOMARI_TOKEN
+                km_env = get_safe_env({"AGENT_ENDPOINT": km_endpoint, "AGENT_TOKEN": KOMARI_TOKEN})
                 supervise_process("Komari-Agent", km_cmd, env=km_env)
                 logger.info("[Komari] 监控探针已启动 (已禁用远程 Web SSH 与自动更新)")
         except Exception as err:

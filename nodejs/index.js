@@ -7,7 +7,7 @@
 // ── 1. 基础配置 ──
 const PRESET_UUID           = ''; // 服务 UUID（留空自动生成标准 UUID）
 const PRESET_PORT           = ''; // HTTP 外部服务端口（默认自动搜寻可用端口，如 3000）
-const PRESET_NAME           = ''; // 节点名称前缀（留空自动识别 IP 所在国家与组织，非阻塞）
+const PRESET_NAME           = ''; // 节点名称前缀（留空自动识别 IP 所在国家与组织，最长等待 3s 保障 Reality 伪装匹配）
 const PRESET_IP             = ''; // 自定义公网 IP（留空自动探测）
 const PRESET_SUB            = ''; // 订阅路径后缀（默认 'sub'，即 /sub）
 const PRESET_SUB_TOKEN      = ''; // 订阅安全访问令牌 Token（留空自动生成随机 Token 并持久化，访问需带 ?token=xxx）
@@ -15,10 +15,10 @@ const PRESET_SUB_TOKEN      = ''; // 订阅安全访问令牌 Token（留空自�
 // ── 2. Argo 隧道配置 ──
 const PRESET_DISABLE_ARGO      = ''; // 填 'true' 禁用 Argo，留空则启用
 const PRESET_ARGO_DOMAIN       = ''; // 固定隧道域名（留空使用临时 Quick Tunnel）
-const PRESET_ARGO_AUTH         = ''; // 固定隧道 Token / 凭证
+const PRESET_ARGO_AUTH         = ''; // 固定隧道 Token
 const PRESET_ARGO_PORT         = ''; // Argo 内部聚合分流端口（默认 8001）
 const PRESET_ARGO_PROTOCOL     = ''; // Argo 隧道协议（默认留空走高速 QUIC 链路，可选 'http2'、'quic'）
-const PRESET_CF_PREFER_HOST    = ''; // Cloudflare 优选域名/IP（留空自动从优选池中选择）
+const PRESET_CF_PREFER_HOST    = ''; // Cloudflare 优选域名/IP（留空默认使用内置优选池首选节点）
 
 // ── 3. xhttp 进阶配置（上下行分离）──
 const PRESET_XHTTP_DOWN_MODE   = ''; // 下行策略: 留空默认同源走 Cloudflare，'reality' 下行复用 Reality，'cdn' 下行第三方 CDN (如 AWS CloudFront)
@@ -140,6 +140,15 @@ function resolveCoreDir() {
   for (const dir of candidates) {
     try {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (os.platform() !== 'win32') {
+        const stat = fs.statSync(dir);
+        if (typeof process.getuid === 'function' && stat.uid !== uid) continue;
+        if ((stat.mode & 0o022) !== 0) {
+          try { fs.chmodSync(dir, 0o700); } catch {}
+          const reStat = fs.statSync(dir);
+          if ((reStat.mode & 0o022) !== 0) continue;
+        }
+      }
       const testFile = path.join(dir, `.w_test_${Date.now()}`);
       fs.writeFileSync(testFile, 'ok');
       fs.unlinkSync(testFile);
@@ -158,7 +167,7 @@ const UUID_FILE         = fs.existsSync(path.join(HOME, 'uuid.txt')) ? path.join
 const SUB_TOKEN_FILE    = fs.existsSync(path.join(HOME, 'sub-token.txt')) ? path.join(HOME, 'sub-token.txt') : path.join(CORE_DIR, '.sub-token');
 const SS_PASS_FILE      = fs.existsSync(path.join(HOME, 'ss-pass.txt')) ? path.join(HOME, 'ss-pass.txt') : path.join(CORE_DIR, '.ss-pass');
 const S5_CREDS_FILE     = fs.existsSync(path.join(HOME, 's5-creds.json')) ? path.join(HOME, 's5-creds.json') : path.join(CORE_DIR, '.s5-creds.json');
-const CONFIG_FILE       = fs.existsSync(path.join(HOME, 'xray-config.json')) ? path.join(HOME, 'xray-config.json') : path.join(CORE_DIR, '.config.json');
+const CONFIG_FILE       = path.join(CORE_DIR, '.config.json');
 const REALITY_KEY_FILE  = fs.existsSync(path.join(HOME, 'reality-keys.json')) ? path.join(HOME, 'reality-keys.json') : path.join(CORE_DIR, '.reality-keys.json');
 
 const XRAY_BIN_NAME     = os.platform() === 'win32' ? 'worker.exe' : 'worker';
@@ -200,10 +209,30 @@ const GEO_REALITY_DOMAINS = {
   HK: ['www.hkt.com', 'www.hkix.net'],
   SG: ['www.starhub.com', 'www.myrepublic.net'],
   US: ['gateway.icloud.com', 'dl.fedoraproject.org'],
-  EU: ['www.ovh.com', 'debian.mirror.liteserver.nl'],
   DE: ['www.ovh.com', 'debian.mirror.liteserver.nl'],
+  NL: ['debian.mirror.liteserver.nl', 'www.ovh.com'],
+  FR: ['www.ovh.com', 'debian.mirror.liteserver.nl'],
+  GB: ['www.ovh.com', 'gateway.icloud.com'],
+  EU: ['www.ovh.com', 'debian.mirror.liteserver.nl'],
   DEFAULT: ['www.iij.ad.jp', 'gateway.icloud.com']
 };
+
+function getSafeChildEnv(extra = {}) {
+  const allowedKeys = [
+    'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL',
+    'TMPDIR', 'TEMP', 'TMP',
+    'SYSTEMROOT', 'WINDIR', 'APPDATA', 'LOCALAPPDATA', 'COMSPEC', 'PATHEXT',
+    'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
+    'LD_LIBRARY_PATH', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'
+  ];
+  const safe = {};
+  for (const k of allowedKeys) {
+    if (process.env[k] !== undefined) safe[k] = process.env[k];
+  }
+  return { ...safe, ...extra };
+}
 
 // ──────────────────────────────────────────────
 // 工具函数库
@@ -480,6 +509,10 @@ function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
       }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           const nextUrl = new URL(res.headers.location, currentUrl).href;
+          if (currentUrl.startsWith('https:') && nextUrl.startsWith('http:')) {
+            res.resume();
+            return fail(new Error('禁止从 HTTPS 降级到 HTTP 重定向 (Insecure redirect)'));
+          }
           res.resume();
           return get(nextUrl, redirectCount + 1);
         }
@@ -683,25 +716,36 @@ function superviseProcess(tag, launcher) {
   let restartCount = 0;
   function start() {
     if (isShuttingDown) return;
+    let proc;
     try {
-      const proc = launcher();
-      if (!proc) return;
-      trackedProcesses.push(proc);
-      proc.on('error', (err) => {
-        console.error(`[进程守护] ${tag} 进程执行异常: ${err.message}`);
-      });
-      proc.on('exit', (code, sig) => {
-        const idx = trackedProcesses.indexOf(proc);
-        if (idx !== -1) trackedProcesses.splice(idx, 1);
-        if (isShuttingDown) return;
-        restartCount++;
-        const delay = Math.min(1000 * Math.pow(1.5, restartCount), 15000);
-        console.warn(`[进程守护] ${tag} 异常退出 (code: ${code}, sig: ${sig})，将在 ${(delay/1000).toFixed(1)}s 后自动拉起...`);
-        setTimeout(start, delay);
-      });
+      proc = launcher();
     } catch (err) {
       console.error(`[进程守护] ${tag} 创建失败: ${err.message}`);
+      if (!isShuttingDown) {
+        restartCount++;
+        const delay = Math.min(1000 * Math.pow(1.5, restartCount), 15000);
+        setTimeout(start, delay);
+      }
+      return;
     }
+    if (!proc) return;
+    trackedProcesses.push(proc);
+    const stableTimer = setTimeout(() => {
+      restartCount = 0;
+    }, 30000);
+    proc.on('error', (err) => {
+      console.error(`[进程守护] ${tag} 进程执行异常: ${err.message}`);
+    });
+    proc.on('exit', (code, sig) => {
+      clearTimeout(stableTimer);
+      const idx = trackedProcesses.indexOf(proc);
+      if (idx !== -1) trackedProcesses.splice(idx, 1);
+      if (isShuttingDown) return;
+      restartCount++;
+      const delay = Math.min(1000 * Math.pow(1.5, restartCount), 15000);
+      console.warn(`[进程守护] ${tag} 异常退出 (code: ${code}, sig: ${sig})，将在 ${(delay/1000).toFixed(1)}s 后自动拉起...`);
+      setTimeout(start, delay);
+    });
   }
   start();
 }
@@ -798,6 +842,24 @@ async function main() {
   const S5_USER = s5Creds.user;
   const S5_PASS = s5Creds.pass;
 
+  // 端口防冲突检查
+  const configuredPorts = [
+    { name: 'PORT', port: INBOUND_PORT },
+    { name: 'ARGO_PORT', port: ARGO_PORT },
+    { name: 'REALITY_PORT', port: parseInt(REALITY_PORT, 10) },
+    { name: 'SS_PORT', port: parseInt(SS_PORT, 10) },
+    { name: 'S5_PORT', port: parseInt(S5_PORT, 10) }
+  ].filter(p => !isNaN(p.port) && p.port > 0);
+
+  const portMap = new Map();
+  for (const { name, port } of configuredPorts) {
+    if (portMap.has(port)) {
+      console.error(`[配置致命错误] 端口配置冲突: ${name} 与 ${portMap.get(port)} 同时使用了端口 ${port}`);
+      process.exit(1);
+    }
+    portMap.set(port, name);
+  }
+
   const KOMARI_DOMAIN = (PRESET_KOMARI_DOMAIN || process.env.KOMARI_DOMAIN || '').trim();
   const KOMARI_TOKEN  = (PRESET_KOMARI_TOKEN  || process.env.KOMARI_TOKEN  || '').trim();
 
@@ -808,21 +870,37 @@ async function main() {
   let geoCountry = 'DEFAULT';
   let geoOrg = '';
   let PUBLIC_IP = (PRESET_IP || process.env.PUBLIC_IP || process.env.IP || '').trim();
-  let NODE_NAME = (PRESET_NAME || process.env.NAME || '').trim();
+  let NODE_NAME = (PRESET_NAME || process.env.NODE_NAME || (process.env.NAME && !process.env.WSL_DISTRO_NAME ? process.env.NAME : '')).trim();
 
   const geoPromise = (async () => {
     try {
-      const [ipRes, countryRes, orgRes] = await Promise.allSettled([
-        PUBLIC_IP ? Promise.resolve(PUBLIC_IP) : httpGet('https://ipinfo.io/ip'),
-        httpGet('https://ipinfo.io/country'),
-        httpGet('https://ipinfo.io/org')
-      ]);
-      if (ipRes.status === 'fulfilled' && ipRes.value) PUBLIC_IP = ipRes.value.trim();
-      if (countryRes.status === 'fulfilled' && countryRes.value) geoCountry = countryRes.value.trim().toUpperCase();
-      if (orgRes.status === 'fulfilled' && orgRes.value) geoOrg = orgRes.value.trim();
+      if (!PUBLIC_IP || geoCountry === 'DEFAULT') {
+        const jsonStr = await httpGet('https://ipinfo.io/json');
+        if (jsonStr) {
+          try {
+            const data = JSON.parse(jsonStr);
+            if (!PUBLIC_IP && data.ip) PUBLIC_IP = String(data.ip).trim();
+            if (data.country) geoCountry = String(data.country).trim().toUpperCase();
+            if (data.org) geoOrg = String(data.org).trim();
+          } catch {}
+        }
+      }
     } catch {}
+    if (!PUBLIC_IP) {
+      try {
+        const ipStr = await httpGet('https://api.ipify.org');
+        if (ipStr) PUBLIC_IP = ipStr.trim();
+      } catch {}
+    }
     if (!NODE_NAME) {
-      NODE_NAME = geoCountry && geoOrg ? `${geoCountry}-${geoOrg.replace(/[^a-zA-Z0-9]/g, '')}` : (geoCountry || 'xray');
+      const validCountry = geoCountry && geoCountry !== 'DEFAULT' ? geoCountry : '';
+      if (validCountry && geoOrg) {
+        NODE_NAME = `${validCountry}-${geoOrg.replace(/[^a-zA-Z0-9]/g, '')}`;
+      } else if (validCountry) {
+        NODE_NAME = validCountry;
+      } else {
+        NODE_NAME = 'xray';
+      }
     }
   })();
 
@@ -881,8 +959,10 @@ async function main() {
     const keys = getOrGenerateRealityKeys(xrayBin);
     if (keys.privKey && keys.pubKey) {
       global.REALITY_PUB_KEY = keys.pubKey;
+      const realityShortId = crypto.randomBytes(4).toString('hex');
+      global.REALITY_SHORT_ID = realityShortId;
       realityDomainFinal = await resolveBestRealityDomain(geoCountry, PRESET_REALITY_DOMAIN || process.env.REALITY_DOMAIN);
-      console.log(`[Reality] 启用 VLESS-Reality (Vision)，端口: ${REALITY_PORT}，伪装站点: ${realityDomainFinal}`);
+      console.log(`[Reality] 启用 VLESS-Reality (Vision)，端口: ${REALITY_PORT}，伪装站点: ${realityDomainFinal}，shortId: ${realityShortId}`);
 
       const hasXhttp = inbounds.some(ib => ib.tag === 'vless-xhttp-in');
       inbounds.push({
@@ -904,7 +984,7 @@ async function main() {
             xver: 0,
             serverNames: [realityDomainFinal],
             privateKey: keys.privKey,
-            shortIds: ['']
+            shortIds: [realityShortId, '']
           }
         },
         sniffing: {
@@ -942,13 +1022,24 @@ async function main() {
       settings: {
         auth: 'password',
         accounts: [{ user: S5_USER, pass: S5_PASS }],
-        udp: true
+        udp: true,
+        ...(PUBLIC_IP ? { ip: PUBLIC_IP } : {})
       }
     });
   }
 
   const xrayConfig = {
     log: { loglevel: 'warning' },
+    routing: {
+      domainStrategy: 'IPIfNonMatch',
+      rules: [
+        {
+          type: 'field',
+          outboundTag: 'block',
+          ip: ['geoip:private']
+        }
+      ]
+    },
     inbounds,
     outbounds: [
       { protocol: 'freedom', tag: 'direct' },
@@ -973,7 +1064,7 @@ async function main() {
     return spawn(xrayBin, ['run', '-config', CONFIG_FILE], {
       argv0: os.platform() !== 'win32' ? 'node /app/worker.js' : undefined,
       stdio: 'ignore',
-      env: { ...process.env, XRAY_LOCATION_ASSET: CORE_DIR }
+      env: getSafeChildEnv({ XRAY_LOCATION_ASSET: CORE_DIR })
     });
   });
 
@@ -987,7 +1078,7 @@ async function main() {
   }
 
   // 5. 启动内部 Argo 智能分流多路复用服务 (HTTP / Sub / WS / xhttp)
-  let currentArgoHost = ARGO_DOMAIN || 'your-domain.com';
+  let currentArgoHost = ARGO_DOMAIN || '';
 
   function handleHttp(req, res) {
     let urlObj;
@@ -1008,6 +1099,9 @@ async function main() {
         path: req.url,
         headers: req.headers
       }, (proxyRes) => {
+        proxyRes.on('error', () => {
+          res.destroy();
+        });
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
       });
@@ -1032,9 +1126,13 @@ async function main() {
       if (SUB_TOKEN) {
         const tokenParam = urlObj.searchParams.get('token') || '';
         if (!timingSafeEqualStr(tokenParam, SUB_TOKEN)) {
-          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-          return res.end('Forbidden: Invalid Subscription Token');
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Not Found');
         }
+      }
+      if (!global.SUB_CONTENT) {
+        res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('Tunnel initializing, please retry in 5 seconds...');
       }
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
@@ -1088,7 +1186,6 @@ async function main() {
   if (!DISABLE_ARGO) {
     const argoServer = http.createServer(handleHttp);
     argoServer.requestTimeout = 0;
-    argoServer.headersTimeout = 0;
     argoServer.on('error', (e) => console.error(`[Argo] 内部服务异常: ${e.message}`));
     argoServer.on('upgrade', handleUpgrade);
 
@@ -1101,11 +1198,13 @@ async function main() {
   // 6. 启动外部直连主 HTTP 服务 (挂载 Web、订阅、xhttp 及直连 WebSocket 支持)
   const mainServer = http.createServer(handleHttp);
   mainServer.requestTimeout = 0;
-  mainServer.headersTimeout = 0;
   mainServer.on('error', (e) => console.error(`[HTTP] 主服务异常: ${e.message}`));
   mainServer.on('upgrade', handleUpgrade);
   mainServer.listen(INBOUND_PORT, '0.0.0.0', () => {
     console.log(`[HTTP] Web 伪装站点与订阅服务已就绪: http://0.0.0.0:${INBOUND_PORT}`);
+    if (DISABLE_ARGO) {
+      console.warn('[安全提醒] DISABLE_ARGO 模式下主端口为明文 HTTP，若向公网暴露，建议配置反代或 TLS 证书');
+    }
   });
 
   // 7. 订阅生成器
@@ -1175,7 +1274,7 @@ async function main() {
       xhExtraParam = `&extra=${encodeURIComponent(JSON.stringify(extraObj))}`;
     }
 
-    if (!DISABLE_ARGO) {
+    if (!DISABLE_ARGO && currentHost) {
       // A. VLESS-xhttp
       list.push(`vless://${UUID}@${preferHost}:443?encryption=none&security=tls&type=xhttp&host=${currentHost}&path=${encodeURIComponent(XHTTP_PATH_VLESS)}&mode=packet-up&sni=${currentHost}${xhExtraParam}#${encodeURIComponent(name + '-VLESS-xhttp')}`);
       // B. VLESS-WS
@@ -1203,33 +1302,39 @@ async function main() {
 
     // E. 直连 Reality
     if (REALITY_PORT && global.REALITY_PUB_KEY && formattedIp) {
-      list.push(`vless://${UUID}@${formattedIp}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${realityDomainFinal}&fp=chrome&pbk=${global.REALITY_PUB_KEY}&type=tcp#${encodeURIComponent(name + '-Reality')}`);
+      const sidParam = global.REALITY_SHORT_ID ? `&sid=${global.REALITY_SHORT_ID}` : '';
+      list.push(`vless://${UUID}@${formattedIp}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${realityDomainFinal}&fp=chrome&pbk=${global.REALITY_PUB_KEY}${sidParam}&type=tcp#${encodeURIComponent(name + '-Reality')}`);
     }
 
     // F. 直连 Shadowsocks 2022
     if (SS_PORT && formattedIp) {
-      const uInfo = Buffer.from(`2022-blake3-aes-128-gcm:${SS_PASS}`).toString('base64');
+      const uInfo = Buffer.from(`2022-blake3-aes-128-gcm:${SS_PASS}`).toString('base64url');
       list.push(`ss://${uInfo}@${formattedIp}:${SS_PORT}#${encodeURIComponent(name + '-SS2022')}`);
     }
 
     // G. 直连 Socks5
     if (S5_PORT && formattedIp) {
-      const s5Info = Buffer.from(`${S5_USER}:${S5_PASS}`).toString('base64');
+      const s5Info = Buffer.from(`${S5_USER}:${S5_PASS}`).toString('base64url');
       list.push(`socks://${s5Info}@${formattedIp}:${S5_PORT}#${encodeURIComponent(name + '-Socks5')}`);
     }
 
-    const b64 = Buffer.from(list.join('\n')).toString('base64');
-    global.SUB_CONTENT = b64;
-    try {
-      fs.writeFileSync(SUB_FILE, b64, { mode: 0o600 });
-      secureFilePermissions(SUB_FILE);
-    } catch {}
-    return { b64, list };
+    if (list.length > 0) {
+      const b64 = Buffer.from(list.join('\n')).toString('base64');
+      global.SUB_CONTENT = b64;
+      try {
+        fs.writeFileSync(SUB_FILE, b64, { mode: 0o600 });
+        secureFilePermissions(SUB_FILE);
+      } catch {}
+      return { b64, list };
+    }
+    return { b64: '', list: [] };
   }
 
   // 8. 优选域名选择与初始订阅构建
   const preferHost = PRESET_CF_PREFER_HOST || process.env.CF_PREFER_HOST || CF_PREFER_HOST_CANDIDATES[0];
-  buildSubscription(preferHost, currentArgoHost);
+  if (currentArgoHost || DISABLE_ARGO) {
+    buildSubscription(preferHost, currentArgoHost);
+  }
 
   // 9. 启动 Cloudflare Tunnel
   if (!DISABLE_ARGO) {
@@ -1245,7 +1350,7 @@ async function main() {
         superviseProcess('Cloudflared-Fixed', () => {
           const p = spawn(cfBin, cfArgs, {
             argv0: os.platform() !== 'win32' ? 'node /app/bridge.js' : undefined,
-            env: { ...process.env, TUNNEL_TOKEN: ARGO_AUTH },
+            env: getSafeChildEnv({ TUNNEL_TOKEN: ARGO_AUTH }),
             stdio: ['ignore', 'ignore', 'pipe']
           });
           p.stderr.on('data', (d) => {
@@ -1270,11 +1375,12 @@ async function main() {
         superviseProcess('Cloudflared-Quick', () => {
           const p = spawn(cfBin, cfArgs, {
             argv0: os.platform() !== 'win32' ? 'node /app/bridge.js' : undefined,
+            env: getSafeChildEnv(),
             stdio: ['ignore', 'ignore', 'pipe']
           });
           p.stderr.on('data', (d) => {
             const line = d.toString();
-            const match = line.match(/https:\/\/([a-zA-Z0-9-]+\.trycloudflare\.com)/);
+            const match = line.match(/https:\/\/(?!api\.)([a-zA-Z0-9-]+\.trycloudflare\.com)/i);
             if (match && match[1]) {
               const newHost = match[1];
               if (newHost !== currentArgoHost) {
@@ -1308,7 +1414,7 @@ async function main() {
           return spawn(kmBin, kmArgs, {
             argv0: os.platform() !== 'win32' ? 'node /app/metrics.js' : undefined,
             stdio: 'ignore',
-            env: { ...process.env, AGENT_ENDPOINT: kmEndpoint, AGENT_TOKEN: KOMARI_TOKEN }
+            env: getSafeChildEnv({ AGENT_ENDPOINT: kmEndpoint, AGENT_TOKEN: KOMARI_TOKEN })
           });
         });
         console.log('[Komari] 监控探针已启动 (已禁用远程 Web SSH 与自动更新)');
@@ -1349,8 +1455,10 @@ async function main() {
     if (clearMin > 0) {
       setTimeout(() => {
         try {
-          if (process.stdout.isTTY) console.clear();
-          console.log('[安全自洁] 控制台敏感节点信息已自动清空。');
+          if (process.stdout.isTTY) {
+            console.clear();
+            console.log('[安全自洁] 控制台敏感节点信息已自动清空。');
+          }
         } catch {}
       }, clearMin * 60 * 1000).unref();
     }
@@ -1389,6 +1497,7 @@ async function main() {
       },
       timeout: 5000
     });
+    req.on('timeout', () => req.destroy());
     req.on('error', () => {});
     req.write(payload);
     req.end();
