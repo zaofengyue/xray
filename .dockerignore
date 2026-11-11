@@ -1,0 +1,8 @@
+.git
+.github
+*.md
+python/
+turn2socks/
+xray.sh
+.gitignore
+.gitattributes
