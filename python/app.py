@@ -116,7 +116,7 @@ def graceful_exit(signum=None, frame=None):
                 p.terminate()
         except Exception:
             pass
-    kill_stale_by_tags()
+    kill_stale_pids()
     try:
         if Path("/tmp/.fake_uptime").exists():
             subprocess.run(["umount", "/proc/uptime"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -187,6 +187,43 @@ S5_CREDS_FILE = CORE_DIR / ".s5-creds.json"
 CONFIG_FILE = CORE_DIR / ".config.json"
 REALITY_KEY_FILE = CORE_DIR / ".reality-keys.json"
 SUB_FILE = CORE_DIR / "sub.txt"
+PID_FILE = CORE_DIR / ".pids"
+
+def record_pid(pid: int):
+    try:
+        pids = []
+        if PID_FILE.exists():
+            pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip()]
+        if str(pid) not in pids:
+            pids.append(str(pid))
+            PID_FILE.write_text("\n".join(pids), encoding="utf-8")
+            secure_permissions(PID_FILE)
+    except Exception:
+        pass
+
+def remove_pid(pid: int):
+    try:
+        if PID_FILE.exists():
+            pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and p.strip() != str(pid)]
+            PID_FILE.write_text("\n".join(pids), encoding="utf-8")
+            secure_permissions(PID_FILE)
+    except Exception:
+        pass
+
+def kill_stale_pids():
+    try:
+        if PID_FILE.exists():
+            pids = [p.strip() for p in PID_FILE.read_text(encoding="utf-8").splitlines() if p.strip()]
+            for p in pids:
+                try:
+                    pid = int(p)
+                    os.kill(pid, signal.SIGTERM)
+                except Exception:
+                    pass
+            PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    kill_stale_by_tags()
 
 XRAY_BIN_NAME = "worker.exe" if platform.system().lower() == "windows" else "worker"
 XRAY_BIN_PATH = CORE_DIR / XRAY_BIN_NAME
@@ -220,7 +257,6 @@ GEO_REALITY_DOMAINS = {
   'NL': ['debian.mirror.liteserver.nl', 'www.ovh.com'],
   'FR': ['www.ovh.com', 'debian.mirror.liteserver.nl'],
   'GB': ['www.ovh.com', 'gateway.icloud.com'],
-  'EU': ['www.ovh.com', 'debian.mirror.liteserver.nl'],
   'DEFAULT': ['www.iij.ad.jp', 'gateway.icloud.com']
 }
 
@@ -394,13 +430,15 @@ def wait_port_ready(port: int, host: str = "127.0.0.1", max_wait: float = 10.0) 
 def test_tls13(domain: str, port: int = 443, timeout: float = 2.5) -> bool:
     try:
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.maximum_version = ssl.TLSVersion.TLSv1_3
+        ctx.set_alpn_protocols(["h2", "http/1.1"])
         with socket.create_connection((domain, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
-                return ssock.version() == "TLSv1.3"
+                alpn = ssock.selected_alpn_protocol()
+                return ssock.version() == "TLSv1.3" and alpn in ("h2", "http/1.1")
     except Exception:
         return False
 
@@ -439,6 +477,14 @@ def download_file(url: str, dest: Path, timeout: float = 30.0):
     finally:
         tmp_dest.unlink(missing_ok=True)
 
+def fetch_text(url: str, timeout: float = 15.0) -> str:
+    tmp = CORE_DIR / f".tmp_txt_{int(time.time()*1000)}"
+    try:
+        download_file(url, tmp, timeout)
+        return tmp.read_text(encoding="utf-8", errors="ignore")
+    finally:
+        tmp.unlink(missing_ok=True)
+
 def check_binary(p: Path, args: list) -> bool:
     if not p.exists():
         return False
@@ -465,9 +511,30 @@ def prepare_xray_core() -> Path:
 
     asset = f"Xray-{plat}-{arch}.zip"
     url = f"https://github.com/XTLS/Xray-core/releases/latest/download/{asset}"
+    dgst_url = f"{url}.dgst"
     tmp_zip = CORE_DIR / f".xray_dl_{int(time.time()*1000)}.zip"
     try:
+        expected_sha256 = ""
+        try:
+            dgst = fetch_text(dgst_url, 15.0)
+            m = re.search(r"(?:SHA2-256|SHA256)=\s*([a-f0-9]{64})", dgst, re.I)
+            if m:
+                expected_sha256 = m.group(1).lower()
+        except Exception as e:
+            logger.warning(f"[Xray] 获取 dgst 校验和文件失败: {e}")
+
         download_file(url, tmp_zip, 45.0)
+
+        if expected_sha256:
+            import hashlib
+            with open(tmp_zip, "rb") as f:
+                actual_hash = hashlib.sha256(f.read()).hexdigest().lower()
+            if actual_hash != expected_sha256:
+                raise RuntimeError(f"Xray 核心包 SHA256 校验不匹配! 预期: {expected_sha256}, 实际: {actual_hash}")
+            logger.info(f"[Xray] 核心包 SHA256 校验通过 ({expected_sha256[:16]}...)")
+        else:
+            logger.warning("[Xray] 未能获取有效 SHA256 校验和，已跳过哈希核验")
+
         with zipfile.ZipFile(tmp_zip) as z:
             z.extractall(CORE_DIR / ".xray_tmp")
         extracted = CORE_DIR / ".xray_tmp"
@@ -566,6 +633,8 @@ def supervise_process(tag: str, cmd: list, env: dict = None):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
+                if proc.pid:
+                    record_pid(proc.pid)
                 tracked_subprocesses.append(proc)
                 proc.wait()
                 if time.time() - start_t > 30.0:
@@ -574,6 +643,8 @@ def supervise_process(tag: str, cmd: list, env: dict = None):
                 logger.warning(f"[{tag}] 启动异常: {e}")
             finally:
                 if proc:
+                    if proc.pid:
+                        remove_pid(proc.pid)
                     untrack_subprocess(proc)
             if is_shutting_down:
                 break
@@ -608,13 +679,16 @@ def setup_container_uptime():
         pass
 
 def get_reality_keys(xray_bin: Path):
-    priv, pub = "", ""
+    priv, pub, short_id = "", "", ""
     if REALITY_KEY_FILE.exists():
         try:
             saved = json.loads(REALITY_KEY_FILE.read_text(encoding="utf-8"))
             priv, pub = saved.get("privKey", ""), saved.get("pubKey", "")
+            short_id = saved.get("shortId", "")
         except Exception:
             pass
+    if not short_id:
+        short_id = os.urandom(4).hex()
     if not priv or not pub:
         try:
             out = subprocess.check_output([str(xray_bin), "x25519"], text=True, stderr=subprocess.STDOUT, timeout=5)
@@ -622,19 +696,25 @@ def get_reality_keys(xray_bin: Path):
             m_pub  = re.search(r"(?:Password\s*\(PublicKey\)|Public\s*key|PublicKey|Password)\s*:\s*(\S+)", out, re.I)
             if m_priv and m_pub:
                 priv, pub = m_priv.group(1), m_pub.group(1)
-                REALITY_KEY_FILE.write_text(json.dumps({"privKey": priv, "pubKey": pub}, indent=2), encoding="utf-8")
+                REALITY_KEY_FILE.write_text(json.dumps({"privKey": priv, "pubKey": pub, "shortId": short_id}, indent=2), encoding="utf-8")
                 secure_permissions(REALITY_KEY_FILE)
             else:
                 logger.warning(f"[Reality] x25519 密钥解析未完全匹配 (输出: {re.sub(r'\\s+', ' ', out).strip()})")
         except Exception as e:
             logger.error(f"[Reality] x25519 密钥生成失败: {e}")
-    return priv, pub
+    else:
+        try:
+            REALITY_KEY_FILE.write_text(json.dumps({"privKey": priv, "pubKey": pub, "shortId": short_id}, indent=2), encoding="utf-8")
+            secure_permissions(REALITY_KEY_FILE)
+        except Exception:
+            pass
+    return priv, pub, short_id
 
 # ──────────────────────────────────────────────
 # 主入口逻辑
 # ──────────────────────────────────────────────
 def main():
-    kill_stale_by_tags()
+    kill_stale_pids()
 
     # 1. 载入伪装网页
     camouflage_html = "<h1>Welcome</h1>"
@@ -780,10 +860,9 @@ def main():
     reality_pub_key = ""
     reality_short_id = ""
     if REALITY_PORT and REALITY_PORT.isdigit():
-        priv_k, pub_k = get_reality_keys(xray_bin)
+        priv_k, pub_k, reality_short_id = get_reality_keys(xray_bin)
         if priv_k and pub_k:
             reality_pub_key = pub_k
-            reality_short_id = os.urandom(4).hex()
             reality_domain = resolve_reality_domain(geo_country, CONF_REALITY_DOMAIN or os.environ.get("REALITY_DOMAIN", ""))
             logger.info(f"[Reality] 启用 VLESS-Reality (Vision)，端口 {REALITY_PORT}，伪装站点: {reality_domain}，shortId: {reality_short_id}")
             has_xhttp = any(ib.get("tag") == "vless-xhttp-in" for ib in inbounds)
@@ -806,7 +885,7 @@ def main():
                         "xver": 0,
                         "serverNames": [reality_domain],
                         "privateKey": priv_k,
-                        "shortIds": [reality_short_id, ""]
+                        "shortIds": [reality_short_id]
                     }
                 },
                 "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}
@@ -875,8 +954,15 @@ def main():
     supervise_process("Xray-core", [str(xray_bin), "run", "-config", str(CONFIG_FILE)], env=get_safe_env({"XRAY_LOCATION_ASSET": str(CORE_DIR)}))
 
     if not DISABLE_ARGO:
-        for p in [V_VMESS_PORT, V_VLESS_PORT, V_TROJAN_PORT, V_XHTTP_PORT]:
-            wait_port_ready(p)
+        ports = [
+            (V_VMESS_PORT, "VMess"),
+            (V_VLESS_PORT, "VLESS"),
+            (V_TROJAN_PORT, "Trojan"),
+            (V_XHTTP_PORT, "XHTTP"),
+        ]
+        failed = [f"{name}({p})" for p, name in ports if not wait_port_ready(p)]
+        if failed:
+            logger.warning(f"[核心监控] 警告: 内部入站端口就绪超时: {', '.join(failed)}，请检查 Xray 核心是否正常运行")
 
     # 5. Argo 多协议复用反向代理服务
     sub_content_holder = [""]
@@ -1051,17 +1137,20 @@ def main():
 
                 upgrade = self.headers.get("Upgrade", "").lower()
                 if upgrade == "websocket":
-                    p = urllib.parse.urlparse(self.path).path
-                    target_port = None
-                    if p == WS_PATH_VLESS:
-                        target_port = V_VLESS_PORT
-                    elif p == WS_PATH_VMESS:
-                        target_port = V_VMESS_PORT
-                    elif p == WS_PATH_TROJAN:
-                        target_port = V_TROJAN_PORT
-                    if target_port:
-                        self.proxy_stream(target_port)
-                        return
+                    is_main_server = (self.server.server_address[1] == INBOUND_PORT)
+                    allow_ws = (not is_main_server) or DISABLE_ARGO or (os.environ.get("ENABLE_DIRECT_WS", "").lower() == "true")
+                    if allow_ws:
+                        p = urllib.parse.urlparse(self.path).path
+                        target_port = None
+                        if p == WS_PATH_VLESS:
+                            target_port = V_VLESS_PORT
+                        elif p == WS_PATH_VMESS:
+                            target_port = V_VMESS_PORT
+                        elif p == WS_PATH_TROJAN:
+                            target_port = V_TROJAN_PORT
+                        if target_port:
+                            self.proxy_stream(target_port)
+                            return
 
                 mname = 'do_' + self.command
                 if not hasattr(self, mname):
@@ -1146,6 +1235,8 @@ def main():
         argo_server = ThreadedTCPServer((argo_listen_host, ARGO_PORT), MultiProxyHandler)
         threading.Thread(target=argo_server.serve_forever, daemon=True).start()
         logger.info(f"[Argo] 多协议单端口分流引擎运行于 {argo_listen_host}:{ARGO_PORT}")
+        if argo_listen_host == "0.0.0.0":
+            logger.warning(f"[安全提醒] XHTTP_DOWN_MODE=cdn 模式下 Argo 端口监听 0.0.0.0:{ARGO_PORT} (明文 HTTP)，请确保仅供前置反代/CDN 访问或配置防火墙")
 
     main_server = ThreadedTCPServer(("0.0.0.0", INBOUND_PORT), MultiProxyHandler)
     threading.Thread(target=main_server.serve_forever, daemon=True).start()
@@ -1154,8 +1245,7 @@ def main():
         logger.warning("[安全提醒] DISABLE_ARGO 模式下主端口为明文 HTTP，若向公网暴露，建议配置反代或 TLS 证书")
 
     prefer_host = CONF_CF_PREFER_HOST or os.environ.get("CF_PREFER_HOST", CF_PREFER_HOST_CANDIDATES[0])
-    if current_argo_host[0] or DISABLE_ARGO:
-        build_subscription(prefer_host, current_argo_host[0])
+    build_subscription(prefer_host, current_argo_host[0])
 
     def send_telegram_notice(h: str, cur_links: list):
         token = (CONF_TG_BOT_TOKEN or os.environ.get("TG_BOT_TOKEN", "")).strip()
@@ -1240,6 +1330,8 @@ def main():
                         proc = None
                         try:
                             proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            if proc.pid:
+                                record_pid(proc.pid)
                             tracked_subprocesses.append(proc)
                             for line in proc.stderr:
                                 if "Registered tunnel connection" in line:
@@ -1252,6 +1344,8 @@ def main():
                             logger.warning(f"[Argo] 固定隧道运行异常: {e}")
                         finally:
                             if proc:
+                                if proc.pid:
+                                    remove_pid(proc.pid)
                                 untrack_subprocess(proc)
                         fixed_notified = False
                         time.sleep(3.0)
@@ -1267,6 +1361,8 @@ def main():
                         proc = None
                         try:
                             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            if proc.pid:
+                                record_pid(proc.pid)
                             tracked_subprocesses.append(proc)
                             for line in proc.stderr:
                                 m = re.search(r"https://(?!api\.)([a-zA-Z0-9-]+\.trycloudflare\.com)", line, re.I)
@@ -1281,11 +1377,15 @@ def main():
                             logger.warning(f"[Argo] 临时隧道运行异常: {e}")
                         finally:
                             if proc:
+                                if proc.pid:
+                                    remove_pid(proc.pid)
                                 untrack_subprocess(proc)
                         time.sleep(3.0)
                 threading.Thread(target=quick_runner, daemon=True).start()
         except Exception as err:
             logger.error(f"[Argo] 隧道启动异常: {err}")
+            logger.warning("[Argo] Cloudflare 隧道未能启动，将仅提供直连协议订阅")
+            on_ready("")
     else:
         logger.info("[Argo] 隧道已被禁用 (DISABLE_ARGO=true)，仅运行直连与本地分流服务")
         on_ready("")

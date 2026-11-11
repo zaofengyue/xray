@@ -80,7 +80,9 @@ function killStaleByTag(tags = PROC_TAGS) {
 }
 
 process.on('uncaughtException', (err) => {
-  console.error(`[系统守护] 拦截未捕获异常: ${err && err.stack ? err.stack : (err && err.message ? err.message : err)}`);
+  console.error(`[系统守护] 拦截未捕获致命异常: ${err && err.stack ? err.stack : (err && err.message ? err.message : err)}`);
+  gracefulExit('uncaughtException');
+  setTimeout(() => process.exit(1), 500);
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -96,7 +98,7 @@ function gracefulExit(sig) {
       if (proc && !proc.killed) proc.kill('SIGTERM');
     } catch {}
   }
-  killStaleByTag();
+  killStalePids();
   if (uptimeTimer) {
     clearInterval(uptimeTimer);
     try { execSync('umount /proc/uptime', { stdio: 'ignore' }); } catch {}
@@ -169,6 +171,47 @@ const SS_PASS_FILE      = fs.existsSync(path.join(HOME, 'ss-pass.txt')) ? path.j
 const S5_CREDS_FILE     = fs.existsSync(path.join(HOME, 's5-creds.json')) ? path.join(HOME, 's5-creds.json') : path.join(CORE_DIR, '.s5-creds.json');
 const CONFIG_FILE       = path.join(CORE_DIR, '.config.json');
 const REALITY_KEY_FILE  = fs.existsSync(path.join(HOME, 'reality-keys.json')) ? path.join(HOME, 'reality-keys.json') : path.join(CORE_DIR, '.reality-keys.json');
+const PID_FILE          = path.join(CORE_DIR, '.pids');
+
+function recordPid(pid) {
+  try {
+    let pids = [];
+    if (fs.existsSync(PID_FILE)) {
+      pids = fs.readFileSync(PID_FILE, 'utf8').split('\n').map(x => x.trim()).filter(Boolean);
+    }
+    if (!pids.includes(String(pid))) {
+      pids.push(String(pid));
+      fs.writeFileSync(PID_FILE, pids.join('\n'), { mode: 0o600 });
+      secureFilePermissions(PID_FILE);
+    }
+  } catch {}
+}
+
+function removePid(pid) {
+  try {
+    if (fs.existsSync(PID_FILE)) {
+      const pids = fs.readFileSync(PID_FILE, 'utf8').split('\n').map(x => x.trim()).filter(p => p && p !== String(pid));
+      fs.writeFileSync(PID_FILE, pids.join('\n'), { mode: 0o600 });
+      secureFilePermissions(PID_FILE);
+    }
+  } catch {}
+}
+
+function killStalePids() {
+  try {
+    if (fs.existsSync(PID_FILE)) {
+      const pids = fs.readFileSync(PID_FILE, 'utf8').split('\n').map(x => x.trim()).filter(Boolean);
+      for (const p of pids) {
+        const pid = parseInt(p, 10);
+        if (pid && !isNaN(pid)) {
+          try { process.kill(pid, 'SIGTERM'); } catch {}
+        }
+      }
+      try { fs.unlinkSync(PID_FILE); } catch {}
+    }
+  } catch {}
+  killStaleByTag();
+}
 
 const XRAY_BIN_NAME     = os.platform() === 'win32' ? 'worker.exe' : 'worker';
 const XRAY_BIN_PATH     = path.join(CORE_DIR, XRAY_BIN_NAME);
@@ -213,7 +256,6 @@ const GEO_REALITY_DOMAINS = {
   NL: ['debian.mirror.liteserver.nl', 'www.ovh.com'],
   FR: ['www.ovh.com', 'debian.mirror.liteserver.nl'],
   GB: ['www.ovh.com', 'gateway.icloud.com'],
-  EU: ['www.ovh.com', 'debian.mirror.liteserver.nl'],
   DEFAULT: ['www.iij.ad.jp', 'gateway.icloud.com']
 };
 
@@ -420,7 +462,8 @@ function testTls13(domain, port = 443, timeoutMs = 2500) {
       servername: domain,
       minVersion: 'TLSv1.3',
       maxVersion: 'TLSv1.3',
-      rejectUnauthorized: false
+      ALPNProtocols: ['h2', 'http/1.1'],
+      rejectUnauthorized: true
     });
     let settled = false;
     const timer = setTimeout(() => {
@@ -435,8 +478,10 @@ function testTls13(domain, port = 443, timeoutMs = 2500) {
       if (!settled) {
         settled = true;
         clearTimeout(timer);
+        const alpn = s.alpnProtocol;
+        const authorized = s.authorized;
         try { s.destroy(); } catch {}
-        resolve(true);
+        resolve(Boolean(authorized && (alpn === 'h2' || alpn === 'http/1.1')));
       }
     });
 
@@ -540,6 +585,16 @@ function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
   });
 }
 
+async function fetchText(url, timeoutMs = 15000, maxRedirects = 5) {
+  const tmp = path.join(CORE_DIR, `.tmp_txt_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+  try {
+    await downloadBinary(url, tmp, timeoutMs, maxRedirects);
+    return fs.readFileSync(tmp, 'utf8');
+  } finally {
+    try { fs.unlinkSync(tmp); } catch {}
+  }
+}
+
 function extractZip(zipPath, targetDir) {
   fs.mkdirSync(targetDir, { recursive: true });
   // 策略 1: 尝试系统自带 tar (Windows 10/11 bsdtar, macOS, Linux 均支持解压 zip)
@@ -614,11 +669,32 @@ async function prepareXrayCore() {
 
   const assetName = `Xray-${p}-${a}.zip`;
   const url = `https://github.com/XTLS/Xray-core/releases/latest/download/${assetName}`;
+  const dgstUrl = `${url}.dgst`;
   const tmpZip = path.join(CORE_DIR, `.xray_dl_${Date.now()}.zip`);
   const tmpExtract = path.join(CORE_DIR, `.xray_extract_${Date.now()}`);
 
   try {
+    let expectedSha256 = '';
+    try {
+      const dgst = await fetchText(dgstUrl, 15000);
+      const m = dgst.match(/(?:SHA2-256|SHA256)=\s*([a-f0-9]{64})/i);
+      if (m) expectedSha256 = m[1].toLowerCase();
+    } catch (e) {
+      console.warn(`[Xray] 获取 dgst 校验和文件失败: ${e.message}`);
+    }
+
     await downloadBinary(url, tmpZip, 45000);
+
+    if (expectedSha256) {
+      const actualHash = crypto.createHash('sha256').update(fs.readFileSync(tmpZip)).digest('hex').toLowerCase();
+      if (actualHash !== expectedSha256) {
+        throw new Error(`Xray 核心包 SHA256 校验不匹配! 预期: ${expectedSha256}, 实际: ${actualHash}`);
+      }
+      console.log(`[Xray] 核心包 SHA256 校验通过 (${expectedSha256.slice(0, 16)}...)`);
+    } else {
+      console.warn('[Xray] 未能获取有效 SHA256 校验和，已跳过哈希核验');
+    }
+
     extractZip(tmpZip, tmpExtract);
 
     const binarySource = path.join(tmpExtract, os.platform() === 'win32' ? 'xray.exe' : 'xray');
@@ -729,22 +805,33 @@ function superviseProcess(tag, launcher) {
       return;
     }
     if (!proc) return;
+    if (proc.pid) recordPid(proc.pid);
     trackedProcesses.push(proc);
     const stableTimer = setTimeout(() => {
       restartCount = 0;
     }, 30000);
-    proc.on('error', (err) => {
-      console.error(`[进程守护] ${tag} 进程执行异常: ${err.message}`);
-    });
-    proc.on('exit', (code, sig) => {
+
+    let handled = false;
+    function scheduleRestart(reason) {
+      if (handled) return;
+      handled = true;
       clearTimeout(stableTimer);
+      if (proc.pid) removePid(proc.pid);
       const idx = trackedProcesses.indexOf(proc);
       if (idx !== -1) trackedProcesses.splice(idx, 1);
       if (isShuttingDown) return;
       restartCount++;
       const delay = Math.min(1000 * Math.pow(1.5, restartCount), 15000);
-      console.warn(`[进程守护] ${tag} 异常退出 (code: ${code}, sig: ${sig})，将在 ${(delay/1000).toFixed(1)}s 后自动拉起...`);
+      console.warn(`[进程守护] ${tag} ${reason}，将在 ${(delay / 1000).toFixed(1)}s 后自动拉起...`);
       setTimeout(start, delay);
+    }
+
+    proc.on('error', (err) => {
+      console.error(`[进程守护] ${tag} 进程执行异常: ${err.message}`);
+      scheduleRestart(`发生错误: ${err.message}`);
+    });
+    proc.on('exit', (code, sig) => {
+      scheduleRestart(`异常退出 (code: ${code}, sig: ${sig})`);
     });
   }
   start();
@@ -765,18 +852,22 @@ function setupContainerUptime() {
 }
 
 // ──────────────────────────────────────────────
-// Reality 密钥对生成
+// Reality 密钥对生成与持久化
 // ──────────────────────────────────────────────
 function getOrGenerateRealityKeys(xrayBin) {
-  let privKey = '', pubKey = '';
+  let privKey = '', pubKey = '', shortId = '';
   if (fs.existsSync(REALITY_KEY_FILE)) {
     try {
       const saved = JSON.parse(fs.readFileSync(REALITY_KEY_FILE, 'utf8'));
       if (saved.privKey && saved.pubKey) {
         privKey = saved.privKey;
         pubKey  = saved.pubKey;
+        shortId = saved.shortId || '';
       }
     } catch {}
+  }
+  if (!shortId) {
+    shortId = crypto.randomBytes(4).toString('hex');
   }
   if (!privKey || !pubKey) {
     try {
@@ -786,7 +877,7 @@ function getOrGenerateRealityKeys(xrayBin) {
       if (privMatch && pubMatch) {
         privKey = privMatch[1];
         pubKey  = pubMatch[1];
-        fs.writeFileSync(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey }, null, 2), { mode: 0o600 });
+        fs.writeFileSync(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey, shortId }, null, 2), { mode: 0o600 });
         secureFilePermissions(REALITY_KEY_FILE);
       } else {
         console.warn(`[Reality] x25519 密钥解析未完全匹配 (输出: ${out.replace(/\s+/g, ' ').trim()})`);
@@ -794,15 +885,21 @@ function getOrGenerateRealityKeys(xrayBin) {
     } catch (e) {
       console.error(`[Reality] x25519 密钥生成失败: ${e.message}`);
     }
+  } else {
+    // 确保已存在密钥时 shortId 也能被持久化保存
+    try {
+      fs.writeFileSync(REALITY_KEY_FILE, JSON.stringify({ privKey, pubKey, shortId }, null, 2), { mode: 0o600 });
+      secureFilePermissions(REALITY_KEY_FILE);
+    } catch {}
   }
-  return { privKey, pubKey };
+  return { privKey, pubKey, shortId };
 }
 
 // ──────────────────────────────────────────────
 // 主程序启动引擎
 // ──────────────────────────────────────────────
 async function main() {
-  killStaleByTag();
+  killStalePids();
 
   // 1. 载入伪装网页内容
   try {
@@ -959,7 +1056,7 @@ async function main() {
     const keys = getOrGenerateRealityKeys(xrayBin);
     if (keys.privKey && keys.pubKey) {
       global.REALITY_PUB_KEY = keys.pubKey;
-      const realityShortId = crypto.randomBytes(4).toString('hex');
+      const realityShortId = keys.shortId;
       global.REALITY_SHORT_ID = realityShortId;
       realityDomainFinal = await resolveBestRealityDomain(geoCountry, PRESET_REALITY_DOMAIN || process.env.REALITY_DOMAIN);
       console.log(`[Reality] 启用 VLESS-Reality (Vision)，端口: ${REALITY_PORT}，伪装站点: ${realityDomainFinal}，shortId: ${realityShortId}`);
@@ -984,7 +1081,7 @@ async function main() {
             xver: 0,
             serverNames: [realityDomainFinal],
             privateKey: keys.privKey,
-            shortIds: [realityShortId, '']
+            shortIds: [realityShortId]
           }
         },
         sniffing: {
@@ -1069,12 +1166,16 @@ async function main() {
   });
 
   if (!DISABLE_ARGO) {
-    await Promise.all([
-      waitPortReady(V_VMESS_PORT),
-      waitPortReady(V_VLESS_PORT),
-      waitPortReady(V_TROJAN_PORT),
-      waitPortReady(V_XHTTP_PORT)
+    const readyResults = await Promise.all([
+      waitPortReady(V_VMESS_PORT).then(r => ({ port: V_VMESS_PORT, name: 'VMess', ok: r })),
+      waitPortReady(V_VLESS_PORT).then(r => ({ port: V_VLESS_PORT, name: 'VLESS', ok: r })),
+      waitPortReady(V_TROJAN_PORT).then(r => ({ port: V_TROJAN_PORT, name: 'Trojan', ok: r })),
+      waitPortReady(V_XHTTP_PORT).then(r => ({ port: V_XHTTP_PORT, name: 'XHTTP', ok: r }))
     ]);
+    const failed = readyResults.filter(r => !r.ok);
+    if (failed.length > 0) {
+      console.warn(`[核心监控] 警告: 内部入站端口就绪超时: ${failed.map(f => `${f.name}(${f.port})`).join(', ')}，请检查 Xray 核心是否正常运行`);
+    }
   }
 
   // 5. 启动内部 Argo 智能分流多路复用服务 (HTTP / Sub / WS / xhttp)
@@ -1192,14 +1293,19 @@ async function main() {
     const argoListenHost = XHTTP_DOWN_MODE === 'cdn' ? '0.0.0.0' : '127.0.0.1';
     argoServer.listen(ARGO_PORT, argoListenHost, () => {
       console.log(`[Argo] 多协议单端口复用引擎运行于 ${argoListenHost}:${ARGO_PORT}`);
+      if (argoListenHost === '0.0.0.0') {
+        console.warn(`[安全提醒] XHTTP_DOWN_MODE=cdn 模式下 Argo 端口监听 0.0.0.0:${ARGO_PORT} (明文 HTTP)，请确保仅供前置反代/CDN 访问或配置防火墙`);
+      }
     });
   }
 
-  // 6. 启动外部直连主 HTTP 服务 (挂载 Web、订阅、xhttp 及直连 WebSocket 支持)
+  // 6. 启动外部直连主 HTTP 服务 (挂载 Web、订阅、xhttp；仅在无 Argo 或显式开启时挂载直连 WS)
   const mainServer = http.createServer(handleHttp);
   mainServer.requestTimeout = 0;
   mainServer.on('error', (e) => console.error(`[HTTP] 主服务异常: ${e.message}`));
-  mainServer.on('upgrade', handleUpgrade);
+  if (DISABLE_ARGO || process.env.ENABLE_DIRECT_WS === 'true') {
+    mainServer.on('upgrade', handleUpgrade);
+  }
   mainServer.listen(INBOUND_PORT, '0.0.0.0', () => {
     console.log(`[HTTP] Web 伪装站点与订阅服务已就绪: http://0.0.0.0:${INBOUND_PORT}`);
     if (DISABLE_ARGO) {
@@ -1330,11 +1436,9 @@ async function main() {
     return { b64: '', list: [] };
   }
 
-  // 8. 优选域名选择与初始订阅构建
+  // 8. 优选域名选择与初始订阅构建 (直连节点优先就绪，隧道就绪后再刷新 Argo 节点)
   const preferHost = PRESET_CF_PREFER_HOST || process.env.CF_PREFER_HOST || CF_PREFER_HOST_CANDIDATES[0];
-  if (currentArgoHost || DISABLE_ARGO) {
-    buildSubscription(preferHost, currentArgoHost);
-  }
+  buildSubscription(preferHost, currentArgoHost);
 
   // 9. 启动 Cloudflare Tunnel
   if (!DISABLE_ARGO) {
@@ -1395,6 +1499,8 @@ async function main() {
       }
     } catch (err) {
       console.error(`[Argo] 隧道启动异常: ${err.message}`);
+      console.warn('[Argo] Cloudflare 隧道未能启动，将仅提供直连协议订阅');
+      onTunnelReady('');
     }
   } else {
     console.log('[Argo] 隧道已被禁用 (DISABLE_ARGO=true)，仅运行直连与本地分流服务');
