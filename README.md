@@ -20,7 +20,8 @@ docker run -d \
   -e ARGO_AUTH=你的固定隧道Token \
   -e REALITY_PORT=443 \
   -p 443:443 \
-  ghcr.io/zaofengyue/xray:latest
+  zaofengyue/xray:latest
+# 或使用 GitHub 镜像源：ghcr.io/zaofengyue/xray:latest
 ```
 
 ---
