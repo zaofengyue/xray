@@ -142,7 +142,7 @@ def resolve_core_dir() -> Path:
             c.mkdir(parents=True, exist_ok=True)
             if platform.system().lower() != "windows":
                 st = c.stat()
-                is_prebaked = (str(c) == "/opt/xray-core" and st.st_uid == 0 and is_container_environment())
+                is_prebaked = (str(c) == "/opt/xray-core" and st.st_uid == 0 and uid != 0 and is_container_environment())
                 if not is_prebaked and hasattr(os, "getuid") and st.st_uid != uid:
                     continue
                 if not is_prebaked and (st.st_mode & 0o022) != 0:
@@ -1286,7 +1286,8 @@ def main():
                 sel.register(client_sock, selectors.EVENT_READ, target_sock)
                 sel.register(target_sock, selectors.EVENT_READ, client_sock)
                 try:
-                    IDLE_LIMIT = int(os.environ.get("IDLE_TIMEOUT", "300"))
+                    raw_timeout = os.environ.get("XRAY_IDLE_TIMEOUT") or os.environ.get("IDLE_TIMEOUT", "300")
+                    IDLE_LIMIT = int(raw_timeout)
                 except (ValueError, TypeError):
                     IDLE_LIMIT = 300
                 last_activity = time.time()

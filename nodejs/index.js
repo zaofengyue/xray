@@ -125,7 +125,7 @@ function resolveCoreDir() {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       if (os.platform() !== 'win32') {
         const stat = fs.statSync(dir);
-        const isPrebaked = (dir === '/opt/xray-core' && stat.uid === 0 && isContainerEnvironment());
+        const isPrebaked = (dir === '/opt/xray-core' && stat.uid === 0 && uid !== 0 && isContainerEnvironment());
         if (!isPrebaked && typeof process.getuid === 'function' && stat.uid !== uid) continue;
         if (!isPrebaked && (stat.mode & 0o022) !== 0) {
           try { fs.chmodSync(dir, 0o700); } catch {}
@@ -1009,7 +1009,7 @@ async function main() {
     portMap.set(port, name);
   }
 
-  const parsedTimeout = parseInt(process.env.IDLE_TIMEOUT || '300', 10);
+  const parsedTimeout = parseInt(process.env.XRAY_IDLE_TIMEOUT || process.env.IDLE_TIMEOUT || '300', 10);
   const IDLE_TIMEOUT_SEC = !isNaN(parsedTimeout) ? parsedTimeout : 300;
   const IDLE_TIMEOUT_MS = IDLE_TIMEOUT_SEC > 0 ? IDLE_TIMEOUT_SEC * 1000 : 0;
 
