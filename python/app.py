@@ -10,7 +10,7 @@ CONF_PORT           = ""  # HTTP 外部服务端口（默认自动搜寻可用�
 CONF_NAME           = ""  # 节点名称前缀（留空自动识别 IP 所在国家与组织，非阻塞）
 CONF_IP             = ""  # 自定义公网 IP（留空自动探测）
 CONF_SUB            = ""  # 订阅路径后缀（默认 "sub"，即 /sub）
-CONF_SUB_TOKEN      = ""  # 订阅安全访问令牌 Token（留空不设鉴权，设置后需 /sub?token=xxx 访问）
+CONF_SUB_TOKEN      = ""  # 订阅安全访问令牌 Token（留空自动生成随机 Token 并持久化，访问需带 ?token=xxx）
 
 # ── 2. Argo 隧道配置 ──
 CONF_DISABLE_ARGO      = ""  # 填 "true" 禁用 Argo，留空则启用
@@ -31,8 +31,8 @@ CONF_REALITY_DOMAIN = ""  # Reality 伪装域名（留空自动按国家地域�
 CONF_SS_PORT        = ""  # Shadowsocks 2022 端口 (TCP/UDP)
 CONF_SS_PASS        = ""  # Shadowsocks 2022 密钥 (留空自动生成 16 字节 Base64)
 CONF_S5_PORT        = ""  # SOCKS5 代理端口 (TCP/UDP)
-CONF_S5_USER        = ""  # SOCKS5 用户名 (留空默认 UUID 前 8 位)
-CONF_S5_PASS        = ""  # SOCKS5 密码 (留空默认 UUID 后 12 位)
+CONF_S5_USER        = ""  # SOCKS5 用户名 (留空自动生成独立随机凭据并持久化)
+CONF_S5_PASS        = ""  # SOCKS5 密码 (留空自动生成独立随机凭据并持久化)
 
 # ── 5. Komari 探针监控配置（可选，填写则上报监控，留空不启动）──
 CONF_KOMARI_DOMAIN  = ""  # Komari 服务端域名（如 komari.example.com）
@@ -80,6 +80,13 @@ tracked_subprocesses = []
 is_shutting_down = False
 uptime_thread = None
 
+def untrack_subprocess(proc):
+    try:
+        if proc in tracked_subprocesses:
+            tracked_subprocesses.remove(proc)
+    except (ValueError, AttributeError):
+        pass
+
 PROC_TAGS = ['node /app/worker.js', 'node /app/bridge.js', 'node /app/metrics.js']
 
 def kill_stale_by_tags():
@@ -103,7 +110,7 @@ def graceful_exit(signum=None, frame=None):
         return
     is_shutting_down = True
     logger.info("收到退出信号，正在安全终止工作进程与网络通道...")
-    for p in tracked_subprocesses:
+    for p in list(tracked_subprocesses):
         try:
             if p.poll() is None:
                 p.terminate()
@@ -317,10 +324,19 @@ def http_get(url: str, timeout: float = 3.0) -> str:
         pass
     return ""
 
+def safe_int(val, default: int = 0) -> int:
+    try:
+        if val is None:
+            return default
+        return int(str(val).strip())
+    except (ValueError, TypeError):
+        return default
+
 def find_available_port(start: int = 3000) -> int:
     for p in range(start, start + 1000):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if platform.system().lower() != "windows":
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("0.0.0.0", p))
                 return p
@@ -502,6 +518,7 @@ def supervise_process(tag: str, cmd: list, env: dict = None):
     def runner():
         restart_count = 0
         while not is_shutting_down:
+            proc = None
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -513,6 +530,9 @@ def supervise_process(tag: str, cmd: list, env: dict = None):
                 proc.wait()
             except Exception as e:
                 logger.warning(f"[{tag}] 启动异常: {e}")
+            finally:
+                if proc:
+                    untrack_subprocess(proc)
             if is_shutting_down:
                 break
             restart_count += 1
@@ -588,8 +608,10 @@ def main():
     TROJAN_PASS = UUID
     SUB_PATH = (CONF_SUB or os.environ.get("SUB", "sub")).strip().lstrip("/")
     SUB_TOKEN = get_or_generate_sub_token(CONF_SUB_TOKEN)
-    INBOUND_PORT = int(CONF_PORT or os.environ.get("PORT") or find_available_port(3000))
-    ARGO_PORT = int(CONF_ARGO_PORT or os.environ.get("ARGO_PORT", "8001"))
+    port_val = safe_int(CONF_PORT or os.environ.get("PORT"))
+    INBOUND_PORT = port_val if port_val > 0 else find_available_port(3000)
+    argo_p = safe_int(CONF_ARGO_PORT or os.environ.get("ARGO_PORT"), 8001)
+    ARGO_PORT = argo_p if argo_p > 0 else 8001
     DISABLE_ARGO = (CONF_DISABLE_ARGO or os.environ.get("DISABLE_ARGO", "")).lower() == "true"
     ARGO_DOMAIN = (CONF_ARGO_DOMAIN or os.environ.get("ARGO_DOMAIN", "")).strip()
     ARGO_AUTH = (CONF_ARGO_AUTH or os.environ.get("ARGO_AUTH", "")).strip()
@@ -703,6 +725,7 @@ def main():
             reality_pub_key = pub_k
             reality_domain = resolve_reality_domain(geo_country, CONF_REALITY_DOMAIN or os.environ.get("REALITY_DOMAIN", ""))
             logger.info(f"[Reality] 启用 VLESS-Reality (Vision)，端口 {REALITY_PORT}，伪装站点: {reality_domain}")
+            has_xhttp = any(ib.get("tag") == "vless-xhttp-in" for ib in inbounds)
             inbounds.append({
                 "tag": "reality-in",
                 "port": int(REALITY_PORT),
@@ -711,7 +734,7 @@ def main():
                 "settings": {
                     "clients": [{"id": UUID, "flow": "xtls-rprx-vision"}],
                     "decryption": "none",
-                    **({"fallbacks": [{"dest": V_XHTTP_PORT, "xver": 0}]} if not DISABLE_ARGO else {})
+                    **({"fallbacks": [{"dest": V_XHTTP_PORT, "xver": 0}]} if has_xhttp else {})
                 },
                 "streamSettings": {
                     "network": "tcp",
@@ -1102,7 +1125,7 @@ def main():
                 print(lk)
             print("============================================================\n")
 
-            clear_min = int(CONF_LOG_CLEAR_MINUTES or os.environ.get("LOG_CLEAR_MINUTES", "2"))
+            clear_min = safe_int(CONF_LOG_CLEAR_MINUTES or os.environ.get("LOG_CLEAR_MINUTES"), 2)
             if clear_min > 0:
                 def delayed_clear():
                     time.sleep(clear_min * 60)
@@ -1130,6 +1153,7 @@ def main():
                 def cf_runner():
                     fixed_notified = False
                     while not is_shutting_down:
+                        proc = None
                         try:
                             proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
                             tracked_subprocesses.append(proc)
@@ -1142,6 +1166,9 @@ def main():
                             proc.wait()
                         except Exception as e:
                             logger.warning(f"[Argo] 固定隧道运行异常: {e}")
+                        finally:
+                            if proc:
+                                untrack_subprocess(proc)
                         fixed_notified = False
                         time.sleep(3.0)
                 threading.Thread(target=cf_runner, daemon=True).start()
@@ -1153,6 +1180,7 @@ def main():
                 cmd.extend(["--url", f"http://127.0.0.1:{ARGO_PORT}"])
                 def quick_runner():
                     while not is_shutting_down:
+                        proc = None
                         try:
                             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
                             tracked_subprocesses.append(proc)
@@ -1167,6 +1195,9 @@ def main():
                             proc.wait()
                         except Exception as e:
                             logger.warning(f"[Argo] 临时隧道运行异常: {e}")
+                        finally:
+                            if proc:
+                                untrack_subprocess(proc)
                         time.sleep(3.0)
                 threading.Thread(target=quick_runner, daemon=True).start()
         except Exception as err:

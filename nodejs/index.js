@@ -10,7 +10,7 @@ const PRESET_PORT           = ''; // HTTP 外部服务端口（默认自动搜�
 const PRESET_NAME           = ''; // 节点名称前缀（留空自动识别 IP 所在国家与组织，非阻塞）
 const PRESET_IP             = ''; // 自定义公网 IP（留空自动探测）
 const PRESET_SUB            = ''; // 订阅路径后缀（默认 'sub'，即 /sub）
-const PRESET_SUB_TOKEN      = ''; // 订阅安全访问令牌 Token（留空不设鉴权，设置后需 /sub?token=xxx 访问）
+const PRESET_SUB_TOKEN      = ''; // 订阅安全访问令牌 Token（留空自动生成随机 Token 并持久化，访问需带 ?token=xxx）
 
 // ── 2. Argo 隧道配置 ──
 const PRESET_DISABLE_ARGO      = ''; // 填 'true' 禁用 Argo，留空则启用
@@ -31,8 +31,8 @@ const PRESET_REALITY_DOMAIN = ''; // Reality 伪装域名（留空自动按国�
 const PRESET_SS_PORT        = ''; // Shadowsocks 2022 端口 (TCP/UDP)
 const PRESET_SS_PASS        = ''; // Shadowsocks 2022 密钥 (留空自动生成 16 字节 Base64)
 const PRESET_S5_PORT        = ''; // SOCKS5 代理端口 (TCP/UDP)
-const PRESET_S5_USER        = ''; // SOCKS5 用户名 (留空默认 UUID 前 8 位)
-const PRESET_S5_PASS        = ''; // SOCKS5 密码 (留空默认 UUID 后 12 位)
+const PRESET_S5_USER        = ''; // SOCKS5 用户名 (留空自动生成独立随机凭据并持久化)
+const PRESET_S5_PASS        = ''; // SOCKS5 密码 (留空自动生成独立随机凭据并持久化)
 
 // ── 5. Komari 探针监控配置（可选，填写则上报监控，留空不启动）──
 const PRESET_KOMARI_DOMAIN  = ''; // Komari 服务端域名（如 komari.example.com）
@@ -884,6 +884,7 @@ async function main() {
       realityDomainFinal = await resolveBestRealityDomain(geoCountry, PRESET_REALITY_DOMAIN || process.env.REALITY_DOMAIN);
       console.log(`[Reality] 启用 VLESS-Reality (Vision)，端口: ${REALITY_PORT}，伪装站点: ${realityDomainFinal}`);
 
+      const hasXhttp = inbounds.some(ib => ib.tag === 'vless-xhttp-in');
       inbounds.push({
         tag: 'reality-in',
         port: parseInt(REALITY_PORT, 10),
@@ -892,7 +893,7 @@ async function main() {
         settings: {
           clients: [{ id: UUID, flow: 'xtls-rprx-vision' }],
           decryption: 'none',
-          ...(!DISABLE_ARGO ? { fallbacks: [{ dest: V_XHTTP_PORT, xver: 0 }] } : {})
+          ...(hasXhttp ? { fallbacks: [{ dest: V_XHTTP_PORT, xver: 0 }] } : {})
         },
         streamSettings: {
           network: 'tcp',
