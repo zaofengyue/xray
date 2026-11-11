@@ -392,7 +392,12 @@ const LISTEN_ADDR = checkIpv6Supported() ? '::' : '0.0.0.0';
 function validateIp(raw) {
   if (!raw || typeof raw !== 'string') return '';
   const cand = raw.trim().replace(/^\[/, '').replace(/\]$/, '');
-  return net.isIP(cand) ? cand : '';
+  if (net.isIP(cand)) return cand;
+  // 允许合规的域名/DDNS 主机名 (总长 <= 253, 标签 1-63 字符且符合 RFC 1123, 至少包含一个点)
+  if (cand.length <= 253 && /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/.test(cand)) {
+    return cand;
+  }
+  return '';
 }
 
 function httpGet(url, timeoutMs = 3000) {
@@ -982,7 +987,11 @@ async function main() {
   // 3. 异步并发地理探测与节点名称预解析
   let geoCountry = 'DEFAULT';
   let geoOrg = '';
-  let PUBLIC_IP = validateIp(PRESET_IP || process.env.PUBLIC_IP || process.env.IP || '');
+  const rawIpConf = PRESET_IP || process.env.PUBLIC_IP || process.env.IP || '';
+  let PUBLIC_IP = validateIp(rawIpConf);
+  if (rawIpConf && !PUBLIC_IP) {
+    console.warn(`[网络] 显式配置的 IP/域名格式无效: '${rawIpConf}'，将尝试自动探测公网 IP`);
+  }
   let NODE_NAME = (PRESET_NAME || process.env.NODE_NAME || (process.env.NAME && !process.env.WSL_DISTRO_NAME ? process.env.NAME : '')).trim();
 
   const geoPromise = (async () => {
@@ -1632,5 +1641,6 @@ async function main() {
 
 main().catch(err => {
   console.error(`[致命错误] 服务启动异常中断: ${err && err.stack ? err.stack : err}`);
-  process.exit(1);
+  process.exitCode = 1;
+  gracefulExit('ERROR');
 });

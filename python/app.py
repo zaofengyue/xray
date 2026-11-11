@@ -80,6 +80,7 @@ logger = logging.getLogger("py-xray")
 tracked_subprocesses = []
 is_shutting_down = False
 uptime_thread = None
+EXIT_CODE = 0
 
 def untrack_subprocess(proc):
     try:
@@ -89,9 +90,9 @@ def untrack_subprocess(proc):
         pass
 
 def graceful_exit(signum=None, frame=None):
-    global is_shutting_down
+    global is_shutting_down, EXIT_CODE
     if is_shutting_down:
-        return
+        sys.exit(EXIT_CODE)
     is_shutting_down = True
     logger.info("收到退出信号，正在安全终止工作进程与网络通道...")
     for p in list(tracked_subprocesses):
@@ -108,7 +109,7 @@ def graceful_exit(signum=None, frame=None):
     except Exception:
         pass
     time.sleep(0.3)
-    sys.exit(0)
+    sys.exit(EXIT_CODE)
 
 signal.signal(signal.SIGINT, graceful_exit)
 signal.signal(signal.SIGTERM, graceful_exit)
@@ -217,7 +218,11 @@ def validate_ip(raw: str) -> str:
         ipaddress.ip_address(cand)
         return cand
     except Exception:
-        return ""
+        pass
+    # 允许合规的域名/DDNS 主机名 (总长 <= 253, 标签 1-63 字符且符合 RFC 1123, 至少包含一个点)
+    if len(cand) <= 253 and re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$", cand):
+        return cand
+    return ""
 
 def kill_stale_pids():
     try:
@@ -794,7 +799,10 @@ def main():
 
     # 3. 异步探测公网 IP 与地理位置
     geo_country = "DEFAULT"
-    PUBLIC_IP = validate_ip(CONF_IP or os.environ.get("PUBLIC_IP") or os.environ.get("IP", ""))
+    raw_ip_conf = CONF_IP or os.environ.get("PUBLIC_IP") or os.environ.get("IP", "")
+    PUBLIC_IP = validate_ip(raw_ip_conf)
+    if raw_ip_conf and not PUBLIC_IP:
+        logger.warning(f"[网络] 显式配置的 IP/域名格式无效: '{raw_ip_conf}'，将尝试自动探测公网 IP")
     NODE_NAME = (CONF_NAME or os.environ.get("NODE_NAME") or (os.environ.get("NAME") if not os.environ.get("WSL_DISTRO_NAME") else "") or "").strip()
 
     def probe_geo():
@@ -1444,7 +1452,10 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         pass
+    except SystemExit as e:
+        EXIT_CODE = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
     except Exception as e:
         logger.error(f"[致命错误] 服务中断: {e}", exc_info=True)
+        EXIT_CODE = 1
     finally:
         graceful_exit()
