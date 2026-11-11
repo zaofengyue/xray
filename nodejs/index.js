@@ -80,9 +80,7 @@ function killStaleByTag(tags = PROC_TAGS) {
 }
 
 process.on('uncaughtException', (err) => {
-  console.error(`[系统守护] 拦截未捕获致命异常: ${err && err.stack ? err.stack : (err && err.message ? err.message : err)}`);
-  gracefulExit('uncaughtException');
-  setTimeout(() => process.exit(1), 500);
+  console.error(`[系统守护] 拦截未捕获异常: ${err && err.stack ? err.stack : (err && err.message ? err.message : err)}`);
 });
 
 process.on('unhandledRejection', (reason) => {
