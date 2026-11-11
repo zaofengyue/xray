@@ -205,9 +205,8 @@ def kill_stale_pids():
                         try:
                             cmdline = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="ignore")
                             is_our_argv0 = bool(re.search(r"/app/(worker|bridge|metrics)\.js", cmdline, re.I))
-                            is_in_core = str(CORE_DIR) in cmdline
-                            has_config = ".config.json" in cmdline
-                            should_kill = is_our_argv0 or is_in_core or has_config
+                            is_in_core = f"{CORE_DIR}/" in cmdline
+                            should_kill = is_our_argv0 or is_in_core
                         except Exception:
                             should_kill = False
                     if should_kill:
