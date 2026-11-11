@@ -142,7 +142,7 @@ def resolve_core_dir() -> Path:
             c.mkdir(parents=True, exist_ok=True)
             if platform.system().lower() != "windows":
                 st = c.stat()
-                is_prebaked = (str(c) == "/opt/xray-core" and st.st_uid == 0)
+                is_prebaked = (str(c) == "/opt/xray-core" and st.st_uid == 0 and is_container_environment())
                 if not is_prebaked and hasattr(os, "getuid") and st.st_uid != uid:
                     continue
                 if not is_prebaked and (st.st_mode & 0o022) != 0:
@@ -166,7 +166,7 @@ def resolve_core_dir() -> Path:
 def resolve_asset_dir(core_dir: Path) -> Path:
     if (core_dir / "geoip.dat").exists():
         return core_dir
-    for ad in [Path("/opt/xray-core"), Path.cwd() / "bin", Path("/usr/local/share/xray")]:
+    for ad in [Path("/opt/xray-core"), Path("/usr/local/share/xray"), Path("/usr/share/xray")]:
         if (ad / "geoip.dat").exists():
             return ad
     return core_dir
@@ -798,7 +798,8 @@ def main():
             try:
                 content = p.read_text(encoding="utf-8")
                 # 严格防泄露保护：绝不将管理部署面板（包含配置生成控件）作为对外 Web 伪装页使用
-                if "Xray 部署面板" in content or 'id="field-uuid"' in content:
+                if "Xray 部署面板" in content or 'id="field-uuid"' in content or 'data-key="reality"' in content:
+                    print(f"[Web 伪装] 检测到 {p} 为部署面板页面，已自动跳过以防管理界面外泄")
                     continue
                 camouflage_html = content
                 break

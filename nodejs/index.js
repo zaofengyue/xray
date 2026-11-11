@@ -125,7 +125,7 @@ function resolveCoreDir() {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       if (os.platform() !== 'win32') {
         const stat = fs.statSync(dir);
-        const isPrebaked = (dir === '/opt/xray-core' && stat.uid === 0);
+        const isPrebaked = (dir === '/opt/xray-core' && stat.uid === 0 && isContainerEnvironment());
         if (!isPrebaked && typeof process.getuid === 'function' && stat.uid !== uid) continue;
         if (!isPrebaked && (stat.mode & 0o022) !== 0) {
           try { fs.chmodSync(dir, 0o700); } catch {}
@@ -144,7 +144,7 @@ function resolveCoreDir() {
 
 function resolveAssetDir(coreDir) {
   if (fs.existsSync(path.join(coreDir, 'geoip.dat'))) return coreDir;
-  for (const ad of ['/opt/xray-core', path.join(process.cwd(), 'bin'), '/usr/local/share/xray']) {
+  for (const ad of ['/opt/xray-core', '/usr/local/share/xray', '/usr/share/xray']) {
     if (fs.existsSync(path.join(ad, 'geoip.dat'))) return ad;
   }
   return coreDir;
@@ -958,7 +958,8 @@ async function main() {
       if (fs.existsSync(hp)) {
         const content = fs.readFileSync(hp, 'utf8');
         // 严格防泄露保护：绝不将管理部署面板（包含配置生成控件）作为对外 Web 伪装页使用
-        if (content.includes('Xray 部署面板') || content.includes('id="field-uuid"')) {
+        if (content.includes('Xray 部署面板') || content.includes('id="field-uuid"') || content.includes('data-key="reality"')) {
+          console.warn(`[Web 伪装] 检测到 ${hp} 为部署面板页面，已自动跳过以防管理界面外泄`);
           continue;
         }
         global.CAMOUFLAGE_HTML = content;
