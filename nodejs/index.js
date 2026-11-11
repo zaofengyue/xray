@@ -994,11 +994,8 @@ async function main() {
     portMap.set(port, name);
   }
 
-  let IDLE_TIMEOUT_SEC = 300;
-  try {
-    const parsed = parseInt(process.env.IDLE_TIMEOUT || '300', 10);
-    if (!isNaN(parsed)) IDLE_TIMEOUT_SEC = parsed;
-  } catch {}
+  const parsedTimeout = parseInt(process.env.IDLE_TIMEOUT || '300', 10);
+  const IDLE_TIMEOUT_SEC = !isNaN(parsedTimeout) ? parsedTimeout : 300;
   const IDLE_TIMEOUT_MS = IDLE_TIMEOUT_SEC > 0 ? IDLE_TIMEOUT_SEC * 1000 : 0;
 
   const KOMARI_DOMAIN = (PRESET_KOMARI_DOMAIN || process.env.KOMARI_DOMAIN || '').trim();
