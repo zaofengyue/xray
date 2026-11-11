@@ -237,18 +237,25 @@
           <!-- VLESS-Reality -->
           <div class="proto-card" id="card-reality" style="grid-column: 1 / -1;">
             <div class="proto-card-header">
-              <span class="proto-name">VLESS-Reality <span class="proto-badge">Vision 原生流控 · 核心推荐</span></span>
-              <span class="proto-var">REALITY_PORT</span>
+              <span class="proto-name">VLESS-Reality <span class="proto-badge">Vision &amp; xhttp · 核心推荐</span></span>
+              <span class="proto-var">REALITY_PORT / XHTTP_PORT</span>
             </div>
             <div class="field-row" style="margin-top:4px;">
               <div class="field">
-                <label>监听端口</label>
+                <label>Reality TCP 端口 (Vision)</label>
                 <div class="field-input-row">
                   <input type="number" id="input-reality" placeholder="推荐 443 或自定义高位">
                   <button type="button" class="btn-mini btn-proto-rand" data-key="reality">生成</button>
                 </div>
               </div>
               <div class="field">
+                <label>Reality xhttp 端口 (SplitHTTP)</label>
+                <div class="field-input-row">
+                  <input type="number" id="input-xhttp" placeholder="留空不启用 (推荐高位)">
+                  <button type="button" class="btn-mini btn-proto-rand" data-key="xhttp">生成</button>
+                </div>
+              </div>
+              <div class="field" style="grid-column: 1 / -1;">
                 <label>伪装站点 SNI (自动 TLS 1.3 探测)</label>
                 <div class="field-input-row">
                   <input type="text" id="field-reality-domain" placeholder="默认地域自适应 (如 www.iij.ad.jp)">
@@ -257,6 +264,19 @@
               </div>
             </div>
             <span class="field-hint">内置日本 IIJ、香港 HKT、新加坡、美国及欧洲本土骨干合规站点池，规避大厂顶级域名 ASN 不符风控。</span>
+          </div>
+
+          <!-- Trojan-TCP -->
+          <div class="proto-card" id="card-trojan">
+            <div class="proto-card-header">
+              <span class="proto-name">Trojan-TCP</span>
+              <span class="proto-var">TROJAN_PORT</span>
+            </div>
+            <div class="field-input-row">
+              <input type="number" id="input-trojan" placeholder="留空不启用">
+              <button type="button" class="btn-mini btn-proto-rand" data-key="trojan">生成</button>
+            </div>
+            <span class="desc">原生 TLS + xhttp 智能回落</span>
           </div>
 
           <!-- Shadowsocks 2022 -->
@@ -357,8 +377,8 @@
   const state = {
     uuid: '', port: '', name: '', sub: '', publicIp: '',
     argoPort: '', argoDomain: '', argoAuth: '', disableArgo: false, cfPrefer: '',
-    reality: '', realityDomain: '',
-    ss: '', s5: '',
+    reality: '', xhttp: '', realityDomain: '',
+    trojan: '', ss: '', s5: '',
     komariDomain: '', komariToken: '',
     cmdType: 'curl'
   };
@@ -382,7 +402,9 @@
     if(state.disableArgo)   p.push(['DISABLE_ARGO',   'true',             false]);
     if(state.cfPrefer)      p.push(['CF_PREFER_HOST', state.cfPrefer,     false]);
     if(state.reality)       p.push(['REALITY_PORT',   state.reality,      false]);
+    if(state.xhttp)         p.push(['XHTTP_PORT',     state.xhttp,        false]);
     if(state.realityDomain) p.push(['REALITY_DOMAIN', state.realityDomain,false]);
+    if(state.trojan)        p.push(['TROJAN_PORT',    state.trojan,       false]);
     if(state.ss)            p.push(['SS_PORT',        state.ss,           false]);
     if(state.s5)            p.push(['S5_PORT',        state.s5,           false]);
     if(state.komariDomain)  p.push(['KOMARI_DOMAIN',  state.komariDomain, false]);
@@ -407,6 +429,8 @@
       const portVal = state.port || '3000';
       doc += ` -p ${portVal}:${portVal}`;
       if(state.reality) doc += ` -p ${state.reality}:${state.reality}`;
+      if(state.xhttp)   doc += ` -p ${state.xhttp}:${state.xhttp}`;
+      if(state.trojan)  doc += ` -p ${state.trojan}:${state.trojan}`;
       if(state.ss)      doc += ` -p ${state.ss}:${state.ss}`;
       if(state.s5)      doc += ` -p ${state.s5}:${state.s5}`;
       for(const [k, v] of pairs){
@@ -437,6 +461,8 @@
       const portVal = state.port || '3000';
       docHtml += ` -p ${escapeHtml(portVal)}:${escapeHtml(portVal)}`;
       if(state.reality) docHtml += ` -p ${escapeHtml(state.reality)}:${escapeHtml(state.reality)}`;
+      if(state.xhttp)   docHtml += ` -p ${escapeHtml(state.xhttp)}:${escapeHtml(state.xhttp)}`;
+      if(state.trojan)  docHtml += ` -p ${escapeHtml(state.trojan)}:${escapeHtml(state.trojan)}`;
       if(state.ss)      docHtml += ` -p ${escapeHtml(state.ss)}:${escapeHtml(state.ss)}`;
       if(state.s5)      docHtml += ` -p ${escapeHtml(state.s5)}:${escapeHtml(state.s5)}`;
       for(const [k, v] of pairs){
@@ -466,6 +492,11 @@
   }
 
   function updateProtoCard(key){
+    if(key === 'reality' || key === 'xhttp'){
+      const card = document.getElementById('card-reality');
+      if(card) card.classList.toggle('active', !!(state.reality || state.xhttp));
+      return;
+    }
     const card = document.getElementById('card-' + key);
     if(card) card.classList.toggle('active', !!state[key]);
   }
@@ -482,7 +513,7 @@
     });
   });
 
-  ['reality', 'ss', 's5'].forEach(key => {
+  ['reality', 'xhttp', 'trojan', 'ss', 's5'].forEach(key => {
     const el = document.getElementById('input-' + key);
     if(el){
       el.addEventListener('input', e => {
@@ -604,7 +635,7 @@
       if(el) el.value = '';
     });
     document.getElementById('toggle-disable-argo').checked = false;
-    ['reality', 'ss', 's5'].forEach(k => {
+    ['reality', 'xhttp', 'trojan', 'ss', 's5'].forEach(k => {
       const el = document.getElementById('input-' + k);
       if(el) el.value = '';
       updateProtoCard(k);
