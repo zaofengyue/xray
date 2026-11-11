@@ -267,16 +267,28 @@
           </div>
 
           <!-- Trojan-TCP -->
-          <div class="proto-card" id="card-trojan">
+          <div class="proto-card" id="card-trojan" style="grid-column: 1 / -1;">
             <div class="proto-card-header">
-              <span class="proto-name">Trojan-TCP</span>
-              <span class="proto-var">TROJAN_PORT</span>
+              <span class="proto-name">Trojan-TCP <span class="proto-badge">TLS 直连 · xhttp 回落</span></span>
+              <span class="proto-var">TROJAN_PORT / TROJAN_PASS</span>
             </div>
-            <div class="field-input-row">
-              <input type="number" id="input-trojan" placeholder="留空不启用">
-              <button type="button" class="btn-mini btn-proto-rand" data-key="trojan">生成</button>
+            <div class="field-row" style="margin-top:4px;">
+              <div class="field">
+                <label>监听端口</label>
+                <div class="field-input-row">
+                  <input type="number" id="input-trojan" placeholder="留空不启用 (推荐 8443 或自定义)">
+                  <button type="button" class="btn-mini btn-proto-rand" data-key="trojan">生成</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>连接密码</label>
+                <div class="field-input-row">
+                  <input type="text" id="field-trojan-pass" placeholder="留空自动生成强密码">
+                  <button type="button" class="btn-mini" id="gen-trojan-pass">随机</button>
+                </div>
+              </div>
             </div>
-            <span class="desc">原生 TLS + xhttp 智能回落</span>
+            <span class="field-hint">支持自签 TLS 证书或 ACME 域名证书，自动与本地 10003 xhttp 会话汇聚中心联动。</span>
           </div>
 
           <!-- Shadowsocks 2022 -->
@@ -378,7 +390,7 @@
     uuid: '', port: '', name: '', sub: '', publicIp: '',
     argoPort: '', argoDomain: '', argoAuth: '', disableArgo: false, cfPrefer: '',
     reality: '', xhttp: '', realityDomain: '',
-    trojan: '', ss: '', s5: '',
+    trojan: '', trojanPass: '', ss: '', s5: '',
     komariDomain: '', komariToken: '',
     cmdType: 'curl'
   };
@@ -405,6 +417,7 @@
     if(state.xhttp)         p.push(['XHTTP_PORT',     state.xhttp,        false]);
     if(state.realityDomain) p.push(['REALITY_DOMAIN', state.realityDomain,false]);
     if(state.trojan)        p.push(['TROJAN_PORT',    state.trojan,       false]);
+    if(state.trojanPass)    p.push(['TROJAN_PASS',    state.trojanPass,   false]);
     if(state.ss)            p.push(['SS_PORT',        state.ss,           false]);
     if(state.s5)            p.push(['S5_PORT',        state.s5,           false]);
     if(state.komariDomain)  p.push(['KOMARI_DOMAIN',  state.komariDomain, false]);
@@ -497,6 +510,11 @@
       if(card) card.classList.toggle('active', !!(state.reality || state.xhttp));
       return;
     }
+    if(key === 'trojan' || key === 'trojanPass'){
+      const card = document.getElementById('card-trojan');
+      if(card) card.classList.toggle('active', !!(state.trojan || state.trojanPass));
+      return;
+    }
     const card = document.getElementById('card-' + key);
     if(card) card.classList.toggle('active', !!state[key]);
   }
@@ -567,6 +585,16 @@
     render();
   });
 
+  document.getElementById('gen-trojan-pass').addEventListener('click', () => {
+    const b = new Uint8Array(12);
+    crypto.getRandomValues(b);
+    const pass = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+    document.getElementById('field-trojan-pass').value = pass;
+    state.trojanPass = pass;
+    updateProtoCard('trojanPass');
+    render();
+  });
+
   [
     ['field-uuid', 'uuid'],
     ['field-port', 'port'],
@@ -578,12 +606,17 @@
     ['field-argo-auth', 'argoAuth'],
     ['field-cf-prefer', 'cfPrefer'],
     ['field-reality-domain', 'realityDomain'],
+    ['field-trojan-pass', 'trojanPass'],
     ['field-komari-domain', 'komariDomain'],
     ['field-komari-token', 'komariToken']
   ].forEach(([id, key]) => {
     const el = document.getElementById(id);
     if(el){
-      el.addEventListener('input', e => { state[key] = e.target.value.trim(); render(); });
+      el.addEventListener('input', e => {
+        state[key] = e.target.value.trim();
+        if(key === 'trojanPass') updateProtoCard('trojanPass');
+        render();
+      });
     }
   });
 
@@ -629,7 +662,7 @@
     [
       'field-uuid', 'field-port', 'field-name', 'field-sub', 'field-public-ip',
       'field-argo-port', 'field-argo-domain', 'field-argo-auth', 'field-cf-prefer',
-      'field-reality-domain', 'field-komari-domain', 'field-komari-token'
+      'field-reality-domain', 'field-trojan-pass', 'field-komari-domain', 'field-komari-token'
     ].forEach(id => {
       const el = document.getElementById(id);
       if(el) el.value = '';
