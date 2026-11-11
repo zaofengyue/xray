@@ -87,23 +87,6 @@ def untrack_subprocess(proc):
     except (ValueError, AttributeError):
         pass
 
-PROC_TAGS = ['node /app/worker.js', 'node /app/bridge.js', 'node /app/metrics.js']
-
-def kill_stale_by_tags():
-    if platform.system().lower() == "windows":
-        return
-    uid_args = []
-    try:
-        uid = os.getuid()
-        uid_args = ["-u", str(uid)]
-    except Exception:
-        pass
-    for tag in PROC_TAGS:
-        try:
-            subprocess.run(["pkill", *uid_args, "-f", tag], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-
 def graceful_exit(signum=None, frame=None):
     global is_shutting_down
     if is_shutting_down:
@@ -217,13 +200,20 @@ def kill_stale_pids():
             for p in pids:
                 try:
                     pid = int(p)
-                    os.kill(pid, signal.SIGTERM)
+                    should_kill = True
+                    if platform.system().lower() == "linux":
+                        try:
+                            cmdline = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="ignore")
+                            should_kill = bool(re.search(r"worker|bridge|metrics|cloudflared|xray", cmdline, re.I))
+                        except Exception:
+                            should_kill = False
+                    if should_kill:
+                        os.kill(pid, signal.SIGTERM)
                 except Exception:
                     pass
             PID_FILE.unlink(missing_ok=True)
     except Exception:
         pass
-    kill_stale_by_tags()
 
 XRAY_BIN_NAME = "worker.exe" if platform.system().lower() == "windows" else "worker"
 XRAY_BIN_PATH = CORE_DIR / XRAY_BIN_NAME
@@ -438,7 +428,7 @@ def test_tls13(domain: str, port: int = 443, timeout: float = 2.5) -> bool:
         with socket.create_connection((domain, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
                 alpn = ssock.selected_alpn_protocol()
-                return ssock.version() == "TLSv1.3" and alpn in ("h2", "http/1.1")
+                return ssock.version() == "TLSv1.3" and alpn == "h2"
     except Exception:
         return False
 
@@ -447,12 +437,14 @@ def resolve_reality_domain(country: str, custom_domain: str) -> str:
         cd = custom_domain.strip()
         if test_tls13(cd):
             return cd
-        logger.warning(f"[Reality] 自定义伪装域名 {cd} 未能通过 TLS 1.3 探测，自动切换备用...")
+        logger.warning(f"[Reality] 自定义伪装域名 {cd} 未能通过 TLS 1.3 / HTTP/2 探测，自动切换备用...")
     pool = GEO_REALITY_DOMAINS.get(country, GEO_REALITY_DOMAINS['DEFAULT'])
     for d in pool:
         if test_tls13(d):
             return d
-    return pool[0]
+    fallback = pool[0]
+    logger.warning(f"[Reality] 警告: 所有候选伪装站点 TLS/h2 探测均未通过（若运行于精简容器请确认是否安装 ca-certificates），已回退默认伪装站点: {fallback}")
+    return fallback
 
 # ──────────────────────────────────────────────
 # 二进制下载与解压

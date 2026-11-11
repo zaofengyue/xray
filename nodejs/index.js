@@ -62,23 +62,6 @@ const trackedProcesses = [];
 let isShuttingDown = false;
 let uptimeTimer = null;
 
-// 子进程伪装标识 (与 spawn argv0 对齐)
-const PROC_TAGS = ['node /app/worker.js', 'node /app/bridge.js', 'node /app/metrics.js'];
-
-function killStaleByTag(tags = PROC_TAGS) {
-  if (os.platform() === 'win32') return;
-  let uidArgs = [];
-  try {
-    if (typeof os.userInfo === 'function') {
-      const uid = os.userInfo().uid;
-      if (typeof uid === 'number') uidArgs = ['-u', String(uid)];
-    }
-  } catch {}
-  for (const tag of tags) {
-    try { spawnSync('pkill', [...uidArgs, '-f', tag], { stdio: 'ignore' }); } catch {}
-  }
-}
-
 process.on('uncaughtException', (err) => {
   console.error(`[系统守护] 拦截未捕获异常: ${err && err.stack ? err.stack : (err && err.message ? err.message : err)}`);
 });
@@ -202,13 +185,24 @@ function killStalePids() {
       for (const p of pids) {
         const pid = parseInt(p, 10);
         if (pid && !isNaN(pid)) {
-          try { process.kill(pid, 'SIGTERM'); } catch {}
+          let shouldKill = true;
+          // Linux 下校验 /proc/<pid>/cmdline，避免 PID 复用误杀无关系统进程
+          if (os.platform() === 'linux') {
+            try {
+              const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+              shouldKill = /worker|bridge|metrics|cloudflared|xray/i.test(cmdline);
+            } catch {
+              shouldKill = false;
+            }
+          }
+          if (shouldKill) {
+            try { process.kill(pid, 'SIGTERM'); } catch {}
+          }
         }
       }
       try { fs.unlinkSync(PID_FILE); } catch {}
     }
   } catch {}
-  killStaleByTag();
 }
 
 const XRAY_BIN_NAME     = os.platform() === 'win32' ? 'worker.exe' : 'worker';
@@ -479,7 +473,7 @@ function testTls13(domain, port = 443, timeoutMs = 2500) {
         const alpn = s.alpnProtocol;
         const authorized = s.authorized;
         try { s.destroy(); } catch {}
-        resolve(Boolean(authorized && (alpn === 'h2' || alpn === 'http/1.1')));
+        resolve(Boolean(authorized && alpn === 'h2'));
       }
     });
 
@@ -499,7 +493,7 @@ async function resolveBestRealityDomain(countryCode, userCustomDomain) {
     const d = userCustomDomain.trim();
     const ok = await testTls13(d);
     if (ok) return d;
-    console.warn(`[Reality] 自定义伪装域名 ${d} 未能通过 TLS 1.3 探测，尝试自动降级...`);
+    console.warn(`[Reality] 自定义伪装域名 ${d} 未能通过 TLS 1.3 / HTTP/2 探测，尝试自动降级...`);
   }
 
   const pool = GEO_REALITY_DOMAINS[countryCode] || GEO_REALITY_DOMAINS.DEFAULT;
@@ -508,7 +502,9 @@ async function resolveBestRealityDomain(countryCode, userCustomDomain) {
       return domain;
     }
   }
-  return pool[0] || 'www.iij.ad.jp';
+  const fallback = pool[0] || 'www.iij.ad.jp';
+  console.warn(`[Reality] 警告: 所有候选伪装站点 TLS/h2 探测均未通过（若运行于精简容器请确认是否安装 ca-certificates），已回退默认伪装站点: ${fallback}`);
+  return fallback;
 }
 
 // ──────────────────────────────────────────────
@@ -826,7 +822,9 @@ function superviseProcess(tag, launcher) {
 
     proc.on('error', (err) => {
       console.error(`[进程守护] ${tag} 进程执行异常: ${err.message}`);
-      scheduleRestart(`发生错误: ${err.message}`);
+      if (!proc.pid) {
+        scheduleRestart(`启动失败: ${err.message}`);
+      }
     });
     proc.on('exit', (code, sig) => {
       scheduleRestart(`异常退出 (code: ${code}, sig: ${sig})`);
