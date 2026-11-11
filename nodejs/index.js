@@ -171,8 +171,7 @@ function secureWriteText(filePath, content) {
     secureFilePermissions(filePath);
   } catch (err) {
     try { fs.unlinkSync(tmpPath); } catch {}
-    fs.writeFileSync(filePath, content, { mode: 0o600, encoding: 'utf-8' });
-    secureFilePermissions(filePath);
+    throw err;
   }
 }
 

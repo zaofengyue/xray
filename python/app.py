@@ -190,23 +190,24 @@ def secure_write_text(p: Path, content: str):
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
             fd = os.open(tmp_path, flags, 0o600)
             try:
-                try:
-                    os.fchmod(fd, 0o600)
-                except Exception:
-                    pass
-                with open(fd, "w", encoding="utf-8") as f:
-                    f.write(content)
-                    f.flush()
-                    try:
-                        os.fsync(fd)
-                    except Exception:
-                        pass
+                f = os.fdopen(fd, "w", encoding="utf-8")
             except Exception:
                 try:
                     os.close(fd)
                 except Exception:
                     pass
                 raise
+            with f:
+                try:
+                    os.fchmod(f.fileno(), 0o600)
+                except Exception:
+                    pass
+                f.write(content)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
         else:
             tmp_path.write_text(content, encoding="utf-8")
         tmp_path.replace(p)
@@ -216,8 +217,7 @@ def secure_write_text(p: Path, content: str):
             tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
-        p.write_text(content, encoding="utf-8")
-        secure_permissions(p)
+        raise
 
 def record_pid(pid: int):
     with pid_lock:
