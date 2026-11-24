@@ -95,7 +95,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh
 | `NAME` / `NODE_NAME` | 自动识别 (如 JP-IIJ) | 节点名称前缀 |
 | `PUBLIC_IP` / `IP` | 自动并发探测 | 自定义入站公网 IP (NAT 机或弹性 IP 时手动指定) |
 | `SUB` | `sub` | 订阅路径后缀 (即对应 `http://IP:PORT/sub`) |
-| `SUB_TOKEN` | 空 (不设防) | 订阅访问鉴权 Token (若设置，拉取订阅需带 `?token=xxx` 防扫描) |
+| `SUB_TOKEN` | 自动生成 16 字节随机 Token | 订阅访问安全鉴权 Token。留空自动生成随机 Token 并持久化；也可手动指定固定值。访问订阅需携带 `?token=xxx`，默认防爬虫扫描探测 |
 
 ### 2. Argo 隧道配置 (Cloudflare CDN 穿透)
 | 变量名 | 默认值 | 说明 |
