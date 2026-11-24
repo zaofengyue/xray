@@ -422,6 +422,39 @@ function validateHost(raw) {
   return '';
 }
 
+const KNOWN_ISPS = [
+  [/google/i, 'Google'],
+  [/(amazon|aws)/i, 'Amazon'],
+  [/(microsoft|azure)/i, 'Microsoft'],
+  [/cloudflare/i, 'Cloudflare'],
+  [/oracle/i, 'Oracle'],
+  [/digitalocean/i, 'DigitalOcean'],
+  [/(alibaba|aliyun)/i, 'Alibaba'],
+  [/tencent/i, 'Tencent'],
+  [/linode/i, 'Linode'],
+  [/akamai/i, 'Akamai'],
+  [/(vultr|choopa|constant company)/i, 'Vultr'],
+  [/hetzner/i, 'Hetzner'],
+  [/\bovh\b/i, 'OVH'],
+  [/(internet initiative japan|\biij\b)/i, 'IIJ'],
+  [/fastly/i, 'Fastly'],
+];
+
+function cleanOrgName(rawOrg) {
+  if (!rawOrg) return '';
+  const orgStr = String(rawOrg).trim();
+  for (const [pattern, label] of KNOWN_ISPS) {
+    if (pattern.test(orgStr)) return label;
+  }
+  let cleaned = orgStr
+    .replace(/^AS\d+\s*/i, '')
+    .replace(/,?\s*(Inc|LLC|Corp|Corporation|L\.?P\.?|Co|Ltd|SAS|GmbH)\b.*$/i, '')
+    .replace(/\.(com|net|org)\b/i, '')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .trim();
+  return cleaned.slice(0, 16);
+}
+
 function httpGet(url, timeoutMs = 3000) {
   return new Promise((resolve) => {
     try {
@@ -1051,8 +1084,9 @@ async function main() {
     }
     if (!NODE_NAME) {
       const validCountry = geoCountry && geoCountry !== 'DEFAULT' ? geoCountry : '';
-      if (validCountry && geoOrg) {
-        NODE_NAME = `${validCountry}-${geoOrg.replace(/[^a-zA-Z0-9]/g, '')}`;
+      const cleanOrg = cleanOrgName(geoOrg);
+      if (validCountry && cleanOrg) {
+        NODE_NAME = `${validCountry}-${cleanOrg}`;
       } else if (validCountry) {
         NODE_NAME = validCountry;
       } else {

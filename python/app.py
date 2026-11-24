@@ -452,6 +452,37 @@ def get_or_generate_s5_creds(preset_user: str, preset_pass: str) -> tuple:
         pass
     return u, p
 
+KNOWN_ISPS = [
+    (re.compile(r"google", re.IGNORECASE), "Google"),
+    (re.compile(r"(amazon|aws)", re.IGNORECASE), "Amazon"),
+    (re.compile(r"(microsoft|azure)", re.IGNORECASE), "Microsoft"),
+    (re.compile(r"cloudflare", re.IGNORECASE), "Cloudflare"),
+    (re.compile(r"oracle", re.IGNORECASE), "Oracle"),
+    (re.compile(r"digitalocean", re.IGNORECASE), "DigitalOcean"),
+    (re.compile(r"(alibaba|aliyun)", re.IGNORECASE), "Alibaba"),
+    (re.compile(r"tencent", re.IGNORECASE), "Tencent"),
+    (re.compile(r"linode", re.IGNORECASE), "Linode"),
+    (re.compile(r"akamai", re.IGNORECASE), "Akamai"),
+    (re.compile(r"(vultr|choopa|constant company)", re.IGNORECASE), "Vultr"),
+    (re.compile(r"hetzner", re.IGNORECASE), "Hetzner"),
+    (re.compile(r"\bovh\b", re.IGNORECASE), "OVH"),
+    (re.compile(r"(internet initiative japan|\biij\b)", re.IGNORECASE), "IIJ"),
+    (re.compile(r"fastly", re.IGNORECASE), "Fastly"),
+]
+
+def clean_org_name(raw_org: str) -> str:
+    if not raw_org:
+        return ""
+    org_str = str(raw_org).strip()
+    for pattern, label in KNOWN_ISPS:
+        if pattern.search(org_str):
+            return label
+    cleaned = re.sub(r"^AS\d+\s*", "", org_str, flags=re.IGNORECASE)
+    cleaned = re.sub(r",?\s*(Inc|LLC|Corp|Corporation|L\.?P\.?|Co|Ltd|SAS|GmbH)\b.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\.(com|net|org)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[^a-zA-Z0-9]", "", cleaned).strip()
+    return cleaned[:16]
+
 def http_get(url: str, timeout: float = 3.0) -> str:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -872,7 +903,7 @@ def main():
                     geo_country = c
                 org = (data.get("org") or "").strip()
                 if not NODE_NAME:
-                    clean_org = re.sub(r"[^a-zA-Z0-9]", "", org) if org else ""
+                    clean_org = clean_org_name(org)
                     NODE_NAME = f"{geo_country}-{clean_org}" if geo_country and clean_org else (geo_country or "xray")
             else:
                 def get_ip():
