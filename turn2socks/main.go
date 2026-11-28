@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -721,13 +722,19 @@ func (s *SocksServer) handleConnection(clientConn net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(rc, clientConn)
+		if _, err := io.Copy(rc, clientConn); err != nil {
+			_ = rc.Close()
+			return
+		}
 		closeWrite(rc)
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(clientConn, rc)
+		if _, err := io.Copy(clientConn, rc); err != nil {
+			_ = clientConn.Close()
+			return
+		}
 		closeWrite(clientConn)
 	}()
 
@@ -797,7 +804,12 @@ func main() {
 
 	// Ensure port in turnServer
 	if _, _, err := net.SplitHostPort(*turnServer); err != nil {
-		*turnServer = net.JoinHostPort(*turnServer, "3478")
+		cleanHost := strings.TrimSuffix(strings.TrimPrefix(*turnServer, "["), "]")
+		*turnServer = net.JoinHostPort(cleanHost, "3478")
+	}
+
+	if *timeoutSec <= 0 {
+		*timeoutSec = 10
 	}
 
 	tc := &TurnClient{

@@ -113,17 +113,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh
 | `ENABLE_DIRECT_WS` | `false` (禁用) | 主 HTTP 端口直连分流开关。若使用 PaaS 自带 HTTPS 域名直连，或使用 AWS CloudFront 回源主端口，设为 `true` 即可在主端口对外分流 `/vless-xhttp` 与 `/vless-ws` |
 | `XHTTP_DOWN_DOMAIN` | 空 | xhttp 下行 CDN 域名 (例如配置 AWS CloudFront 域名 `xxxx.cloudfront.net` 进行下行大带宽回国加速) |
 | `XHTTP_DOWN_HOST` | 留空同上 | xhttp 下行 SNI / Host 伪装头 |
-| `XHTTP_DOWN_MODE` | `auto` | xhttp 分流模式 (可选 `auto` 或 `packet-up`) |
+| `XHTTP_DOWN_MODE` | 空 (同源走 Argo) | xhttp 下行分离策略：留空同源走 Cloudflare，填 `reality` 下行直连复用 Reality 端口（需配 `REALITY_PORT`），填 `cdn` 下行切换第三方 CDN |
 
 ### 4. 可选直连协议配置 (填写端口即开启，留空不开启)
 | 变量名 | 默认值 | 说明 |
 | :--- | :--- | :--- |
 | `REALITY_PORT` | 空 | VLESS-Reality (Vision) 直连端口 (推荐 443 或面板 NAT 高位端口) |
 | `REALITY_DOMAIN` | 地域智能匹配 | Reality 伪装域名 (如 JP 默认 `www.iij.ad.jp`，自动 TLS 1.3 探活) |
-| `SS_PORT` | 空 | Shadowsocks 2022 端口 (TCP/UDP, `2022-blake3-aes-128-gcm`) |
-| `SS_PASS` | 自动生成 16 字节 Base64 | Shadowsocks 2022 密码 |
-| `S5_PORT` | 空 | Socks5 代理端口 (TCP/UDP, 密码鉴权) |
-| `S5_USER` / `S5_PASS` | UUID 截取 | Socks5 用户名与密码 |
+| `SS_PORT` | 空 | Shadowsocks 2022 端口 (TCP/UDP, `2022-blake3-aes-128-gcm`；Docker 需同时映射 `/udp`) |
+| `SS_PASS` | 自动生成 16 字节 Base64 | Shadowsocks 2022 密码 (自动持久化至 `.ss-pass`) |
+| `S5_PORT` | 空 | Socks5 代理端口 (TCP/UDP, 密码鉴权；Docker 需同时映射 `/udp`) |
+| `S5_USER` / `S5_PASS` | 随机生成并持久化 | Socks5 用户名与密码 (自动随机生成并持久化至 `.s5-creds.json`) |
 
 ### 5. 探针监控与高级控制
 | 变量名 | 默认值 | 说明 |
@@ -134,4 +134,4 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zaofengyue/xray/main/xray.sh
 | `TG_CHAT_ID` | 空 | Telegram Chat ID |
 | `SHOW_LOG` | `true` | 是否在控制台打印订阅信息 |
 | `LOG_CLEAR_MINUTES` | `2` | 控制台敏感信息保留时间 (分钟)，`0` 为不清理 |
-| `XRAY_IDLE_TIMEOUT` | `0` (不休眠) | 无流量空闲超时退出时间 (秒)，适用于 Serverless 按需计费容器 |
+| `XRAY_IDLE_TIMEOUT` | `300` | 单连接无流量空闲断开超时时间 (秒)，`0` 表示不启用空闲断开 |

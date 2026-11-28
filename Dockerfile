@@ -46,13 +46,12 @@ RUN set -eux; \
     ln -sf /opt/xray-core/bridge /usr/local/bin/bridge; \
     ln -sf /opt/xray-core/bridge /usr/local/bin/cloudflared; \
     [ -f /opt/xray-core/metrics ] && ln -sf /opt/xray-core/metrics /usr/local/bin/metrics || true; \
-    chmod -R 755 /usr/local/bin; \
-    chmod -R 777 /opt/xray-core
+    chmod -R 755 /usr/local/bin /opt/xray-core
 
 ENV XRAY_LOCATION_ASSET=/opt/xray-core
 
 COPY nodejs/ ./
-RUN chmod -R 777 /app
+RUN chmod -R 755 /app
 
 # 动态轻量化健康检查（避免周期性启动 Node 引擎产生的内存与 CPU 抖动）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

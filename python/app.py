@@ -103,9 +103,9 @@ def graceful_exit(signum=None, frame=None):
             pass
     kill_stale_pids()
     try:
-        if Path("/tmp/.fake_uptime").exists():
+        if FAKE_UPTIME_FILE.exists():
             subprocess.run(["umount", "/proc/uptime"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            Path("/tmp/.fake_uptime").unlink(missing_ok=True)
+            FAKE_UPTIME_FILE.unlink(missing_ok=True)
     except Exception:
         pass
     time.sleep(0.3)
@@ -171,17 +171,20 @@ def resolve_asset_dir(core_dir: Path) -> Path:
             return ad
     return core_dir
 
+HOME_DIR = Path(os.environ.get("HOME") or (os.environ.get("USERPROFILE") if platform.system().lower() == "windows" else "/root") or ".")
 CORE_DIR = resolve_core_dir()
-os.environ["XRAY_LOCATION_ASSET"] = str(resolve_asset_dir(CORE_DIR))
+ASSET_DIR = resolve_asset_dir(CORE_DIR)
+os.environ["XRAY_LOCATION_ASSET"] = str(ASSET_DIR)
 
-UUID_FILE = CORE_DIR / ".session.key"
-SUB_TOKEN_FILE = CORE_DIR / ".sub-token"
-SS_PASS_FILE = CORE_DIR / ".ss-pass"
-S5_CREDS_FILE = CORE_DIR / ".s5-creds.json"
+UUID_FILE = (HOME_DIR / "uuid.txt") if (HOME_DIR / "uuid.txt").exists() else (CORE_DIR / ".session.key")
+SUB_TOKEN_FILE = (HOME_DIR / "sub-token.txt") if (HOME_DIR / "sub-token.txt").exists() else (CORE_DIR / ".sub-token")
+SS_PASS_FILE = (HOME_DIR / "ss-pass.txt") if (HOME_DIR / "ss-pass.txt").exists() else (CORE_DIR / ".ss-pass")
+S5_CREDS_FILE = (HOME_DIR / "s5-creds.json") if (HOME_DIR / "s5-creds.json").exists() else (CORE_DIR / ".s5-creds.json")
 CONFIG_FILE = CORE_DIR / ".config.json"
-REALITY_KEY_FILE = CORE_DIR / ".reality-keys.json"
+REALITY_KEY_FILE = (HOME_DIR / "reality-keys.json") if (HOME_DIR / "reality-keys.json").exists() else (CORE_DIR / ".reality-keys.json")
 SUB_FILE = CORE_DIR / "sub.txt"
 PID_FILE = CORE_DIR / ".pids"
+FAKE_UPTIME_FILE = CORE_DIR / ".fake_uptime"
 pid_lock = threading.Lock()
 
 def secure_permissions(p: Path):
@@ -191,42 +194,45 @@ def secure_permissions(p: Path):
         except Exception:
             pass
 
+_write_lock = threading.Lock()
+
 def secure_write_text(p: Path, content: str):
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = p.with_name(f"{p.name}.tmp.{int(time.time()*1000)}_{os.getpid()}")
-    try:
-        if platform.system().lower() != "windows":
-            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-            fd = os.open(tmp_path, flags, 0o600)
-            try:
-                f = os.fdopen(fd, "w", encoding="utf-8")
-            except Exception:
-                try:
-                    os.close(fd)
-                except Exception:
-                    pass
-                raise
-            with f:
-                try:
-                    os.fchmod(f.fileno(), 0o600)
-                except Exception:
-                    pass
-                f.write(content)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception:
-                    pass
-        else:
-            tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.replace(p)
-        secure_permissions(p)
-    except Exception:
+    tmp_path = p.with_name(f"{p.name}.tmp.{int(time.time()*1000)}_{os.getpid()}_{threading.get_ident()}")
+    with _write_lock:
         try:
-            tmp_path.unlink(missing_ok=True)
+            if platform.system().lower() != "windows":
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                fd = os.open(tmp_path, flags, 0o600)
+                try:
+                    f = os.fdopen(fd, "w", encoding="utf-8")
+                except Exception:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                    raise
+                with f:
+                    try:
+                        os.fchmod(f.fileno(), 0o600)
+                    except Exception:
+                        pass
+                    f.write(content)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+            else:
+                tmp_path.write_text(content, encoding="utf-8")
+            tmp_path.replace(p)
+            secure_permissions(p)
         except Exception:
-            pass
-        raise
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
 def record_pid(pid: int):
     with pid_lock:
@@ -281,6 +287,23 @@ def validate_host(raw: str) -> str:
     if len(cand) <= 253 and re.match(r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*$", cand):
         return cand
     return ""
+
+def format_host_for_url(raw_host: str) -> str:
+    if not raw_host:
+        return ""
+    clean = str(raw_host).strip().strip("[]")
+    return f"[{clean}]" if ":" in clean else clean
+
+def parse_valid_port(raw, fallback: int = 0):
+    if raw is None:
+        return fallback
+    s = str(raw).strip()
+    if not s:
+        return fallback
+    if not s.isdigit():
+        return None
+    p = int(s)
+    return p if 1 <= p <= 65535 else None
 
 def kill_stale_pids():
     try:
@@ -412,16 +435,16 @@ def get_or_generate_ss_pass(preset_pass: str) -> str:
     val = (preset_pass or os.environ.get("SS_PASS", "")).strip()
     if val:
         try:
-            dec = base64.b64decode(val)
+            dec = base64.b64decode(val, validate=True)
             if len(dec) == 16:
                 return val
             logger.warning(f"[SS] 自定义 SS_PASS base64 解码后为 {len(dec)} 字节（必须为 16 字节），将自动生成标准密钥")
         except Exception:
-            pass
+            logger.warning("[SS] 自定义 SS_PASS 不是有效的标准 Base64 编码，将自动生成标准密钥")
     if SS_PASS_FILE.exists():
         try:
             saved = SS_PASS_FILE.read_text(encoding="utf-8").strip()
-            if saved and len(base64.b64decode(saved)) == 16:
+            if saved and len(base64.b64decode(saved, validate=True)) == 16:
                 return saved
         except Exception:
             pass
@@ -433,23 +456,25 @@ def get_or_generate_ss_pass(preset_pass: str) -> str:
     return gen
 
 def get_or_generate_s5_creds(preset_user: str, preset_pass: str) -> tuple:
-    u = (preset_user or os.environ.get("S5_USER", "")).strip()
-    p = (preset_pass or os.environ.get("S5_PASS", "")).strip()
-    if u and p:
-        return u, p
+    u_env = (preset_user or os.environ.get("S5_USER", "")).strip()
+    p_env = (preset_pass or os.environ.get("S5_PASS", "")).strip()
+    if u_env and p_env:
+        return u_env, p_env
+    saved = {}
     if S5_CREDS_FILE.exists():
         try:
-            saved = json.loads(S5_CREDS_FILE.read_text(encoding="utf-8"))
-            if saved.get("user") and saved.get("pass"):
-                return saved["user"], saved["pass"]
+            saved = json.loads(S5_CREDS_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:
+            saved = {}
+    if not u_env and not p_env and saved.get("user") and saved.get("pass"):
+        return saved["user"], saved["pass"]
+    u = u_env or saved.get("user") or ("u" + os.urandom(4).hex())
+    p = p_env or saved.get("pass") or base64.urlsafe_b64encode(os.urandom(12)).decode("utf-8").rstrip("=")
+    if not saved.get("user") or not saved.get("pass"):
+        try:
+            secure_write_text(S5_CREDS_FILE, json.dumps({"user": u, "pass": p}, indent=2))
         except Exception:
             pass
-    u = u or ("u" + os.urandom(4).hex())
-    p = p or base64.urlsafe_b64encode(os.urandom(12)).decode("utf-8").rstrip("=")
-    try:
-        secure_write_text(S5_CREDS_FILE, json.dumps({"user": u, "pass": p}, indent=2))
-    except Exception:
-        pass
     return u, p
 
 KNOWN_ISPS = [
@@ -501,8 +526,11 @@ def safe_int(val, default: int = 0) -> int:
     except (ValueError, TypeError):
         return default
 
-def find_available_port(start: int = 3000) -> int:
+def find_available_port(start: int = 3000, exclude_ports: set = None) -> int:
+    excluded = exclude_ports or set()
     for p in range(start, start + 1000):
+        if p in excluded:
+            continue
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             if platform.system().lower() != "windows":
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -511,6 +539,9 @@ def find_available_port(start: int = 3000) -> int:
                 return p
             except OSError:
                 continue
+    for p in range(start, start + 1000):
+        if p not in excluded:
+            return p
     return start
 
 def wait_port_ready(port: int, host: str = "127.0.0.1", max_wait: float = 10.0) -> bool:
@@ -593,7 +624,7 @@ def check_binary(p: Path, args: list) -> bool:
         return False
     try:
         res = subprocess.run([str(p), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-        return res.returncode == 0 or len(res.stdout) > 0
+        return res.returncode == 0 and len(res.stdout) > 0
     except Exception:
         return False
 
@@ -607,10 +638,14 @@ def prepare_xray_core() -> Path:
             return Path(p)
 
     logger.info("[Xray] 正在下载 XTLS/Xray-core 官方发行版...")
-    arch_map = {"x86_64": "64", "amd64": "64", "aarch64": "arm64-v8a", "arm64": "arm64-v8a", "armv7l": "arm32-v7a"}
+    arch_map = {"x86_64": "64", "amd64": "64", "aarch64": "arm64-v8a", "arm64": "arm64-v8a", "armv7l": "arm32-v7a", "s390x": "s390x"}
     plat_map = {"linux": "linux", "darwin": "macos", "windows": "windows"}
-    plat = plat_map.get(platform.system().lower(), "linux")
-    arch = arch_map.get(platform.machine().lower(), "64")
+    raw_plat = platform.system().lower()
+    raw_arch = platform.machine().lower()
+    plat = plat_map.get(raw_plat)
+    arch = arch_map.get(raw_arch)
+    if not plat or not arch:
+        raise RuntimeError(f"不支持的系统架构: {raw_plat}-{raw_arch}")
 
     asset = f"Xray-{plat}-{arch}.zip"
     url = f"https://github.com/XTLS/Xray-core/releases/latest/download/{asset}"
@@ -727,19 +762,21 @@ def prepare_komari_agent():
 # ──────────────────────────────────────────────
 # 进程守护管理
 # ──────────────────────────────────────────────
-def supervise_process(tag: str, cmd: list, env: dict = None):
+def supervise_process(tag: str, cmd: list, env: dict = None, executable: str = None):
     def runner():
         restart_count = 0
         while not is_shutting_down:
             proc = None
             start_t = time.time()
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    env=env or get_safe_env(),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
+                popen_kwargs = {
+                    "env": env or get_safe_env(),
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL,
+                }
+                if executable and platform.system().lower() != "windows":
+                    popen_kwargs["executable"] = executable
+                proc = subprocess.Popen(cmd, **popen_kwargs)
                 if proc.pid:
                     record_pid(proc.pid)
                 tracked_subprocesses.append(proc)
@@ -767,9 +804,12 @@ def setup_container_uptime():
     global uptime_thread
     if not is_container_environment() or uptime_thread:
         return
-    fake = Path("/tmp/.fake_uptime")
+    fake = FAKE_UPTIME_FILE
     try:
-        fake.write_text("0.00 0.00\n", encoding="utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(fake, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("0.00 0.00\n")
         subprocess.run(["mount", "--bind", str(fake), "/proc/uptime"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         start_t = time.time()
         def worker():
@@ -839,13 +879,25 @@ def main():
 
     UUID = get_or_generate_uuid()
     TROJAN_PASS = UUID
-    SUB_PATH = (CONF_SUB or os.environ.get("SUB", "sub")).strip().lstrip("/")
+    SUB_PATH = (CONF_SUB or os.environ.get("SUB") or "sub").strip().strip("/") or "sub"
     SUB_TOKEN = get_or_generate_sub_token(CONF_SUB_TOKEN)
-    port_val = safe_int(CONF_PORT or os.environ.get("PORT"))
-    INBOUND_PORT = port_val if port_val > 0 else find_available_port(3000)
-    argo_p = safe_int(CONF_ARGO_PORT or os.environ.get("ARGO_PORT"), 8001)
+
+    raw_port = CONF_PORT or os.environ.get("PORT", "")
+    port_val = parse_valid_port(raw_port, 0)
+    if port_val is None:
+        logger.warning(f"[配置] 无效的 PORT='{raw_port}'，将自动寻找可用端口")
+        port_val = 0
+
+    raw_argo_port = CONF_ARGO_PORT or os.environ.get("ARGO_PORT", "")
+    argo_p = parse_valid_port(raw_argo_port, 8001)
+    if argo_p is None:
+        logger.warning(f"[配置] 无效的 ARGO_PORT='{raw_argo_port}'，已回退默认端口 8001")
+        argo_p = 8001
     ARGO_PORT = argo_p if argo_p > 0 else 8001
+
     DISABLE_ARGO = (CONF_DISABLE_ARGO or os.environ.get("DISABLE_ARGO", "")).lower() == "true"
+    ENABLE_DIRECT_WS = os.environ.get("ENABLE_DIRECT_WS", "").lower() == "true"
+    NEED_WS_XHTTP = (not DISABLE_ARGO) or ENABLE_DIRECT_WS
     ARGO_DOMAIN = (CONF_ARGO_DOMAIN or os.environ.get("ARGO_DOMAIN", "")).strip()
     ARGO_AUTH = (CONF_ARGO_AUTH or os.environ.get("ARGO_AUTH", "")).strip()
     ARGO_PROTOCOL = (CONF_ARGO_PROTOCOL or os.environ.get("ARGO_PROTOCOL", "")).strip()
@@ -854,20 +906,49 @@ def main():
     XHTTP_DOWN_DOMAIN = (CONF_XHTTP_DOWN_DOMAIN or os.environ.get("XHTTP_DOWN_DOMAIN", "")).strip()
     XHTTP_DOWN_HOST = (CONF_XHTTP_DOWN_HOST or os.environ.get("XHTTP_DOWN_HOST", "")).strip()
 
-    REALITY_PORT = (CONF_REALITY_PORT or os.environ.get("REALITY_PORT", "")).strip()
-    SS_PORT = (CONF_SS_PORT or os.environ.get("SS_PORT", "")).strip()
+    def resolve_optional_port(name: str, raw_val: str) -> str:
+        if str(raw_val or "").strip() == "0":
+            return ""
+        p = parse_valid_port(raw_val, 0)
+        if p is None:
+            logger.error(f"[配置致命错误] {name} 端口无效: '{raw_val}' (必须为 1-65535 整数)")
+            sys.exit(1)
+        return str(p) if p > 0 else ""
+
+    REALITY_PORT = resolve_optional_port("REALITY_PORT", CONF_REALITY_PORT or os.environ.get("REALITY_PORT", ""))
+    SS_PORT = resolve_optional_port("SS_PORT", CONF_SS_PORT or os.environ.get("SS_PORT", ""))
     SS_PASS = get_or_generate_ss_pass(CONF_SS_PASS)
-    S5_PORT = (CONF_S5_PORT or os.environ.get("S5_PORT", "")).strip()
+    S5_PORT = resolve_optional_port("S5_PORT", CONF_S5_PORT or os.environ.get("S5_PORT", ""))
     S5_USER, S5_PASS = get_or_generate_s5_creds(CONF_S5_USER, CONF_S5_PASS)
 
-    # 端口防冲突检查
-    configured_ports = [
-        ("PORT", INBOUND_PORT),
-        ("ARGO_PORT", ARGO_PORT),
-        ("REALITY_PORT", int(REALITY_PORT) if REALITY_PORT and REALITY_PORT.isdigit() else 0),
-        ("SS_PORT", int(SS_PORT) if SS_PORT and SS_PORT.isdigit() else 0),
-        ("S5_PORT", int(S5_PORT) if S5_PORT and S5_PORT.isdigit() else 0),
-    ]
+    excluded_auto_ports = set()
+    if not DISABLE_ARGO:
+        excluded_auto_ports.add(ARGO_PORT)
+    if NEED_WS_XHTTP:
+        excluded_auto_ports.update({V_VMESS_PORT, V_VLESS_PORT, V_TROJAN_PORT, V_XHTTP_PORT})
+    for opt_p in (REALITY_PORT, SS_PORT, S5_PORT):
+        if opt_p:
+            excluded_auto_ports.add(int(opt_p))
+    INBOUND_PORT = port_val if port_val > 0 else find_available_port(3000, excluded_auto_ports)
+
+    # 端口防冲突检查（启用 Argo 或直连分流时纳入内部回环保留端口 10000-10003）
+    configured_ports = [("PORT", INBOUND_PORT)]
+    if not DISABLE_ARGO:
+        configured_ports.append(("ARGO_PORT", ARGO_PORT))
+    if NEED_WS_XHTTP:
+        configured_ports.extend([
+            ("V_VMESS_PORT(内部)", V_VMESS_PORT),
+            ("V_VLESS_PORT(内部)", V_VLESS_PORT),
+            ("V_TROJAN_PORT(内部)", V_TROJAN_PORT),
+            ("V_XHTTP_PORT(内部)", V_XHTTP_PORT),
+        ])
+    if REALITY_PORT:
+        configured_ports.append(("REALITY_PORT", int(REALITY_PORT)))
+    if SS_PORT:
+        configured_ports.append(("SS_PORT", int(SS_PORT)))
+    if S5_PORT:
+        configured_ports.append(("S5_PORT", int(S5_PORT)))
+
     seen_ports = {}
     for name, p in configured_ports:
         if p > 0:
@@ -904,7 +985,8 @@ def main():
                 org = (data.get("org") or "").strip()
                 if not NODE_NAME:
                     clean_org = clean_org_name(org)
-                    NODE_NAME = f"{geo_country}-{clean_org}" if geo_country and clean_org else (geo_country or "xray")
+                    valid_c = geo_country if geo_country != "DEFAULT" else ""
+                    NODE_NAME = f"{valid_c}-{clean_org}" if valid_c and clean_org else (valid_c or "xray")
             else:
                 def get_ip():
                     nonlocal PUBLIC_IP
@@ -932,7 +1014,7 @@ def main():
 
     # 4. 构建 Xray 配置
     inbounds = []
-    if not DISABLE_ARGO:
+    if NEED_WS_XHTTP:
         inbounds.extend([
             {
                 "tag": "vmess-ws-in",
@@ -1065,9 +1147,16 @@ def main():
         sys.exit(1)
 
     # 启动 Xray
-    supervise_process("Xray-core", [str(xray_bin), "run", "-config", str(CONFIG_FILE)], env=get_safe_env({"XRAY_LOCATION_ASSET": str(CORE_DIR)}))
+    is_win = platform.system().lower() == "windows"
+    xray_cmd = [str(xray_bin), "run", "-config", str(CONFIG_FILE)] if is_win else ["node /app/worker.js", "run", "-config", str(CONFIG_FILE)]
+    supervise_process(
+        "Xray-core",
+        xray_cmd,
+        env=get_safe_env({"XRAY_LOCATION_ASSET": str(ASSET_DIR)}),
+        executable=None if is_win else str(xray_bin),
+    )
 
-    if not DISABLE_ARGO:
+    if NEED_WS_XHTTP:
         ports = [
             (V_VMESS_PORT, "VMess"),
             (V_VLESS_PORT, "VLESS"),
@@ -1148,15 +1237,17 @@ def main():
             xh_extra_param = f"&extra={urllib.parse.quote(json.dumps(extra_obj))}"
 
         if not DISABLE_ARGO and cur_h:
-            links.append(f"vless://{UUID}@{prefer_h}:443?encryption=none&security=tls&type=xhttp&host={cur_h}&path={urllib.parse.quote(XHTTP_PATH_VLESS)}&mode=packet-up&sni={cur_h}{xh_extra_param}#{urllib.parse.quote(name + '-VLESS-xhttp')}")
-            links.append(f"vless://{UUID}@{prefer_h}:443?encryption=none&security=tls&type=ws&host={cur_h}&path={urllib.parse.quote(WS_PATH_VLESS)}&sni={cur_h}#{urllib.parse.quote(name + '-VLESS-WS')}")
+            url_prefer_h = format_host_for_url(prefer_h)
+            raw_prefer_h = str(prefer_h).strip().strip("[]")
+            links.append(f"vless://{UUID}@{url_prefer_h}:443?encryption=none&security=tls&type=xhttp&host={cur_h}&path={urllib.parse.quote(XHTTP_PATH_VLESS)}&mode=packet-up&sni={cur_h}{xh_extra_param}#{urllib.parse.quote(name + '-VLESS-xhttp')}")
+            links.append(f"vless://{UUID}@{url_prefer_h}:443?encryption=none&security=tls&type=ws&host={cur_h}&path={urllib.parse.quote(WS_PATH_VLESS)}&sni={cur_h}#{urllib.parse.quote(name + '-VLESS-WS')}")
             vmess_d = {
-                "v": "2", "ps": f"{name}-VMess-WS", "add": prefer_h, "port": "443",
+                "v": "2", "ps": f"{name}-VMess-WS", "add": raw_prefer_h, "port": "443",
                 "id": UUID, "aid": "0", "scy": "auto", "net": "ws", "type": "none",
                 "host": cur_h, "path": WS_PATH_VMESS, "tls": "tls", "sni": cur_h
             }
             links.append(f"vmess://{base64.b64encode(json.dumps(vmess_d).encode('utf-8')).decode('utf-8')}")
-            links.append(f"trojan://{TROJAN_PASS}@{prefer_h}:443?security=tls&type=ws&host={cur_h}&path={urllib.parse.quote(WS_PATH_TROJAN)}&sni={cur_h}#{urllib.parse.quote(name + '-Trojan-WS')}")
+            links.append(f"trojan://{TROJAN_PASS}@{url_prefer_h}:443?security=tls&type=ws&host={cur_h}&path={urllib.parse.quote(WS_PATH_TROJAN)}&sni={cur_h}#{urllib.parse.quote(name + '-Trojan-WS')}")
 
         if REALITY_PORT and reality_pub_key and fmt_ip:
             sid_param = f"&sid={reality_short_id}" if reality_short_id else ""
@@ -1202,10 +1293,10 @@ def main():
         def route_request(self, send_body: bool = True):
             parsed = urllib.parse.urlparse(self.path)
 
-            # A. xhttp (SplitHTTP) 流反代（仅在 argo_server 上分流，或者在无 Argo / 显式开启直连时在主端口分流）
+            # A. xhttp (SplitHTTP) 流反代（Argo 内部端口直接放行，主端口仅在启用 ENABLE_DIRECT_WS 时放行）
             if parsed.path == XHTTP_PATH_VLESS or parsed.path.startswith(XHTTP_PATH_VLESS + "/"):
                 is_main_server = (self.server.server_address[1] == INBOUND_PORT)
-                allow_xhttp = (not is_main_server) or DISABLE_ARGO or (os.environ.get("ENABLE_DIRECT_WS", "").lower() == "true")
+                allow_xhttp = NEED_WS_XHTTP and ((not is_main_server) or ENABLE_DIRECT_WS)
                 if allow_xhttp:
                     self.proxy_stream(V_XHTTP_PORT)
                     return
@@ -1223,6 +1314,12 @@ def main():
                             self.wfile.write(b"Not Found")
                         return
                 if not sub_content_holder[0]:
+                    if DISABLE_ARGO:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/plain; charset=utf-8")
+                        self.send_header("Cache-Control", "no-cache, no-store")
+                        self.end_headers()
+                        return
                     self.send_response(503)
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
                     self.end_headers()
@@ -1258,7 +1355,7 @@ def main():
                 upgrade = self.headers.get("Upgrade", "").lower()
                 if upgrade == "websocket":
                     is_main_server = (self.server.server_address[1] == INBOUND_PORT)
-                    allow_ws = (not is_main_server) or DISABLE_ARGO or (os.environ.get("ENABLE_DIRECT_WS", "").lower() == "true")
+                    allow_ws = NEED_WS_XHTTP and ((not is_main_server) or ENABLE_DIRECT_WS)
                     if allow_ws:
                         p = urllib.parse.urlparse(self.path).path
                         target_port = None
@@ -1287,11 +1384,14 @@ def main():
             try:
                 target_sock = socket.create_connection(("127.0.0.1", port), timeout=10)
                 client_sock = self.connection
-                client_sock.settimeout(None)
 
-                # 发送重组的 HTTP 请求行与请求头至内部端口
+                # 发送重组的 HTTP 请求行与请求头至内部端口 (过滤潜在 CRLF 注入)
                 target_sock.sendall(self.raw_requestline)
-                req_headers = [f"{k}: {v}\r\n".encode("utf-8") for k, v in self.headers.items()]
+                req_headers = [
+                    f"{k}: {v}\r\n".encode("utf-8")
+                    for k, v in self.headers.items()
+                    if not re.search(r"[\r\n]", str(k)) and not re.search(r"[\r\n]", str(v))
+                ]
                 req_headers.append(b"\r\n")
                 target_sock.sendall(b"".join(req_headers))
 
@@ -1311,6 +1411,10 @@ def main():
 
                 if buf_list:
                     target_sock.sendall(b"".join(buf_list))
+
+                # 统一设置合理的发送超时，避免 target_sock 10s 过短误杀或 client_sock 无限阻塞线程
+                client_sock.settimeout(30.0)
+                target_sock.settimeout(30.0)
 
                 # 双向全双工透明事件分流转发 (DefaultSelector 支持高并发并解除 FD 1024 上限)
                 sel = selectors.DefaultSelector()
@@ -1365,7 +1469,7 @@ def main():
 
     class ThreadedTCPServer(http.server.ThreadingHTTPServer):
         daemon_threads = True
-        allow_reuse_address = True
+        allow_reuse_address = (platform.system().lower() != "windows")
         request_queue_size = 128
 
     if not DISABLE_ARGO:
@@ -1379,10 +1483,12 @@ def main():
     main_server = ThreadedTCPServer(("0.0.0.0", INBOUND_PORT), MultiProxyHandler)
     threading.Thread(target=main_server.serve_forever, daemon=True).start()
     logger.info(f"[HTTP] Web 伪装站与订阅服务运行于 http://0.0.0.0:{INBOUND_PORT}")
+    if ENABLE_DIRECT_WS:
+        logger.info(f"[Direct-WS] 主端口直连分流已启用 ({XHTTP_PATH_VLESS}, {WS_PATH_VLESS}, {WS_PATH_VMESS}, {WS_PATH_TROJAN})，请配合 PaaS/CDN/反代 443 TLS 域名使用")
     if DISABLE_ARGO:
         logger.warning("[安全提醒] DISABLE_ARGO 模式下主端口为明文 HTTP，若向公网暴露，建议配置反代或 TLS 证书")
 
-    prefer_host = CONF_CF_PREFER_HOST or os.environ.get("CF_PREFER_HOST", CF_PREFER_HOST_CANDIDATES[0])
+    prefer_host = (CONF_CF_PREFER_HOST or os.environ.get("CF_PREFER_HOST") or CF_PREFER_HOST_CANDIDATES[0]).strip() or CF_PREFER_HOST_CANDIDATES[0]
     build_subscription(prefer_host, current_argo_host[0])
 
     def send_telegram_notice(h: str, cur_links: list):
@@ -1391,10 +1497,11 @@ def main():
         if not token or not chat_id:
             return
         sub_token_query = f"?token={urllib.parse.quote(SUB_TOKEN)}" if SUB_TOKEN else ""
+        sub_host = format_host_for_url(PUBLIC_IP or "127.0.0.1")
         primary_sub_url = (
             f"https://{h}/{SUB_PATH}{sub_token_query}"
             if not DISABLE_ARGO and h
-            else f"http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}"
+            else f"http://{sub_host}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}"
         )
         safe_node = re.sub(r"[`]", "", NODE_NAME or "xray")
         text = (
@@ -1412,7 +1519,8 @@ def main():
                 data=payload,
                 headers={"Content-Type": "application/json"}
             )
-            urllib.request.urlopen(req, timeout=5.0)
+            with urllib.request.urlopen(req, timeout=5.0):
+                pass
         except Exception:
             pass
 
@@ -1421,10 +1529,11 @@ def main():
         cur_links, _ = build_subscription(prefer_host, h)
         if (CONF_SHOW_LOG or os.environ.get("SHOW_LOG", "true")).lower() != "false":
             sub_token_query = f"?token={urllib.parse.quote(SUB_TOKEN)}" if SUB_TOKEN else ""
+            sub_host = format_host_for_url(PUBLIC_IP or "127.0.0.1")
             primary_sub_url = (
                 f"https://{h}/{SUB_PATH}{sub_token_query}"
                 if not DISABLE_ARGO and h
-                else f"http://{PUBLIC_IP or '127.0.0.1'}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}"
+                else f"http://{sub_host}:{INBOUND_PORT}/{SUB_PATH}{sub_token_query}"
             )
             print("\n============================================================")
             print("🚀 Xray 多功能综合穿透代理服务已就绪 (Python)")
@@ -1433,6 +1542,8 @@ def main():
             if not DISABLE_ARGO and h:
                 print(f"🛡️ Argo 域名: {h}")
             print("---------------- 节点订阅明细 ----------------")
+            if not cur_links and ENABLE_DIRECT_WS:
+                print(f"(已开启主端口直连分流: xhttp={XHTTP_PATH_VLESS}, vless-ws={WS_PATH_VLESS}, vmess-ws={WS_PATH_VMESS}, trojan-ws={WS_PATH_TROJAN}；请搭配前置 TLS/CDN 域名 + 端口 443 使用)")
             for lk in cur_links:
                 print(lk)
             print("============================================================\n")
@@ -1457,7 +1568,7 @@ def main():
             cf_bin = prepare_cloudflared()
             if ARGO_DOMAIN and ARGO_AUTH:
                 logger.info(f"[Argo] 启动固定隧道: {ARGO_DOMAIN}...")
-                cmd = [str(cf_bin), "tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
+                cmd = ([str(cf_bin)] if is_win else ["node /app/bridge.js"]) + ["tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
                 if ARGO_PROTOCOL:
                     cmd.extend(["--protocol", ARGO_PROTOCOL])
                 cmd.append("run")
@@ -1467,7 +1578,10 @@ def main():
                     while not is_shutting_down:
                         proc = None
                         try:
-                            proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            popen_kw = {"env": env, "stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE, "text": True}
+                            if not is_win:
+                                popen_kw["executable"] = str(cf_bin)
+                            proc = subprocess.Popen(cmd, **popen_kw)
                             if proc.pid:
                                 record_pid(proc.pid)
                             tracked_subprocesses.append(proc)
@@ -1482,6 +1596,11 @@ def main():
                             logger.warning(f"[Argo] 固定隧道运行异常: {e}")
                         finally:
                             if proc:
+                                try:
+                                    if proc.stderr:
+                                        proc.stderr.close()
+                                except Exception:
+                                    pass
                                 if proc.pid:
                                     remove_pid(proc.pid)
                                 untrack_subprocess(proc)
@@ -1490,7 +1609,7 @@ def main():
                 threading.Thread(target=cf_runner, daemon=True).start()
             else:
                 logger.info("[Argo] 启动临时隧道 (Quick Tunnel)...")
-                cmd = [str(cf_bin), "tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
+                cmd = ([str(cf_bin)] if is_win else ["node /app/bridge.js"]) + ["tunnel", "--edge-ip-version", "auto", "--no-autoupdate"]
                 if ARGO_PROTOCOL:
                     cmd.extend(["--protocol", ARGO_PROTOCOL])
                 cmd.extend(["--url", f"http://127.0.0.1:{ARGO_PORT}"])
@@ -1498,7 +1617,10 @@ def main():
                     while not is_shutting_down:
                         proc = None
                         try:
-                            proc = subprocess.Popen(cmd, env=get_safe_env(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            popen_kw = {"env": get_safe_env(), "stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE, "text": True}
+                            if not is_win:
+                                popen_kw["executable"] = str(cf_bin)
+                            proc = subprocess.Popen(cmd, **popen_kw)
                             if proc.pid:
                                 record_pid(proc.pid)
                             tracked_subprocesses.append(proc)
@@ -1515,6 +1637,11 @@ def main():
                             logger.warning(f"[Argo] 临时隧道运行异常: {e}")
                         finally:
                             if proc:
+                                try:
+                                    if proc.stderr:
+                                        proc.stderr.close()
+                                except Exception:
+                                    pass
                                 if proc.pid:
                                     remove_pid(proc.pid)
                                 untrack_subprocess(proc)
@@ -1537,9 +1664,9 @@ def main():
                 km_endpoint = KOMARI_DOMAIN.strip()
                 if not re.match(r"^https?://", km_endpoint, re.I):
                     km_endpoint = f"https://{km_endpoint}"
-                km_cmd = [str(km_bin), "--disable-web-ssh", "--disable-auto-update", "-e", km_endpoint]
+                km_cmd = ([str(km_bin)] if is_win else ["node /app/metrics.js"]) + ["--disable-web-ssh", "--disable-auto-update", "-e", km_endpoint]
                 km_env = get_safe_env({"AGENT_ENDPOINT": km_endpoint, "AGENT_TOKEN": KOMARI_TOKEN})
-                supervise_process("Komari-Agent", km_cmd, env=km_env)
+                supervise_process("Komari-Agent", km_cmd, env=km_env, executable=None if is_win else str(km_bin))
                 logger.info("[Komari] 监控探针已启动 (已禁用远程 Web SSH 与自动更新)")
         except Exception as err:
             logger.warning(f"[Komari] 启动异常: {err}")

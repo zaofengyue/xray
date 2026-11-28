@@ -83,7 +83,7 @@ function gracefulExit(sig) {
   if (uptimeTimer) {
     clearInterval(uptimeTimer);
     try { execSync('umount /proc/uptime', { stdio: 'ignore' }); } catch {}
-    try { fs.unlinkSync('/tmp/.fake_uptime'); } catch {}
+    try { fs.unlinkSync(FAKE_UPTIME_FILE); } catch {}
   }
   setTimeout(() => process.exit(process.exitCode || 0), 300);
 }
@@ -152,7 +152,8 @@ function resolveAssetDir(coreDir) {
 
 const HOME = process.env.HOME || (os.platform() === 'win32' ? process.env.USERPROFILE : '/root') || '.';
 const CORE_DIR = resolveCoreDir();
-process.env.XRAY_LOCATION_ASSET = resolveAssetDir(CORE_DIR); // 确保在非 root 降级目录时依然能正确载入 geoip.dat / geosite.dat
+const ASSET_DIR = resolveAssetDir(CORE_DIR);
+process.env.XRAY_LOCATION_ASSET = ASSET_DIR; // 确保在非 root 降级目录时依然能正确载入 geoip.dat / geosite.dat
 
 const SUB_FILE          = path.join(CORE_DIR, 'sub.txt');
 const UUID_FILE         = fs.existsSync(path.join(HOME, 'uuid.txt')) ? path.join(HOME, 'uuid.txt') : path.join(CORE_DIR, '.session.key');
@@ -162,6 +163,7 @@ const S5_CREDS_FILE     = fs.existsSync(path.join(HOME, 's5-creds.json')) ? path
 const CONFIG_FILE       = path.join(CORE_DIR, '.config.json');
 const REALITY_KEY_FILE  = fs.existsSync(path.join(HOME, 'reality-keys.json')) ? path.join(HOME, 'reality-keys.json') : path.join(CORE_DIR, '.reality-keys.json');
 const PID_FILE          = path.join(CORE_DIR, '.pids');
+const FAKE_UPTIME_FILE  = path.join(CORE_DIR, '.fake_uptime');
 
 function secureFilePermissions(filePath) {
   try {
@@ -349,15 +351,19 @@ function getOrGenerateSSPass(presetPass) {
   const custom = (presetPass || process.env.SS_PASS || '').trim();
   if (custom) {
     try {
-      const decoded = Buffer.from(custom, 'base64');
-      if (decoded.length === 16) return custom;
-      console.warn(`[SS] 自定义 SS_PASS base64 解码后为 ${decoded.length} 字节（必须为 16 字节），将自动生成标准密钥`);
+      if (/^[A-Za-z0-9+/]+={0,2}$/.test(custom) && custom.length % 4 === 0) {
+        const decoded = Buffer.from(custom, 'base64');
+        if (decoded.length === 16) return custom;
+        console.warn(`[SS] 自定义 SS_PASS base64 解码后为 ${decoded.length} 字节（必须为 16 字节），将自动生成标准密钥`);
+      } else {
+        console.warn('[SS] 自定义 SS_PASS 不是有效的标准 Base64 编码，将自动生成标准密钥');
+      }
     } catch {}
   }
   try {
     if (fs.existsSync(SS_PASS_FILE)) {
       const saved = fs.readFileSync(SS_PASS_FILE, 'utf8').trim();
-      if (saved && Buffer.from(saved, 'base64').length === 16) return saved;
+      if (saved && /^[A-Za-z0-9+/]+={0,2}$/.test(saved) && saved.length % 4 === 0 && Buffer.from(saved, 'base64').length === 16) return saved;
     }
   } catch {}
   const generated = crypto.randomBytes(16).toString('base64');
@@ -368,22 +374,28 @@ function getOrGenerateSSPass(presetPass) {
 }
 
 function getOrGenerateS5Creds(presetUser, presetPass) {
-  let user = (presetUser || process.env.S5_USER || '').trim();
-  let pass = (presetPass || process.env.S5_PASS || '').trim();
-  if (user && pass) return { user, pass };
+  const envUser = (presetUser || process.env.S5_USER || '').trim();
+  const envPass = (presetPass || process.env.S5_PASS || '').trim();
+  if (envUser && envPass) return { user: envUser, pass: envPass };
 
+  let saved = {};
   try {
     if (fs.existsSync(S5_CREDS_FILE)) {
-      const saved = JSON.parse(fs.readFileSync(S5_CREDS_FILE, 'utf8'));
-      if (saved.user && saved.pass) return saved;
+      saved = JSON.parse(fs.readFileSync(S5_CREDS_FILE, 'utf8')) || {};
     }
   } catch {}
 
-  user = user || ('u' + crypto.randomBytes(4).toString('hex'));
-  pass = pass || crypto.randomBytes(12).toString('base64url');
-  try {
-    secureWriteText(S5_CREDS_FILE, JSON.stringify({ user, pass }, null, 2));
-  } catch {}
+  if (!envUser && !envPass && saved.user && saved.pass) {
+    return { user: saved.user, pass: saved.pass };
+  }
+
+  const user = envUser || saved.user || ('u' + crypto.randomBytes(4).toString('hex'));
+  const pass = envPass || saved.pass || crypto.randomBytes(12).toString('base64url');
+  if (!saved.user || !saved.pass) {
+    try {
+      secureWriteText(S5_CREDS_FILE, JSON.stringify({ user, pass }, null, 2));
+    } catch {}
+  }
   return { user, pass };
 }
 
@@ -420,6 +432,21 @@ function validateHost(raw) {
     return cand;
   }
   return '';
+}
+
+function formatHostForUrl(rawHost) {
+  if (!rawHost) return '';
+  const clean = String(rawHost).trim().replace(/^\[/, '').replace(/\]$/, '');
+  return clean.includes(':') ? `[${clean}]` : clean;
+}
+
+function parseValidPort(raw, fallback = 0) {
+  if (raw === undefined || raw === null) return fallback;
+  const s = String(raw).trim();
+  if (!s) return fallback;
+  if (!/^\d+$/.test(s)) return null;
+  const p = parseInt(s, 10);
+  return (p >= 1 && p <= 65535) ? p : null;
 }
 
 const KNOWN_ISPS = [
@@ -480,7 +507,7 @@ function httpGet(url, timeoutMs = 3000) {
   });
 }
 
-async function findAvailablePort(startPort = 3000) {
+async function findAvailablePort(startPort = 3000, excludePorts = new Set()) {
   function testPort(p) {
     return new Promise(resolve => {
       const s = net.createServer();
@@ -492,7 +519,11 @@ async function findAvailablePort(startPort = 3000) {
     });
   }
   for (let p = startPort; p < startPort + 1000; p++) {
+    if (excludePorts.has(p)) continue;
     if (await testPort(p)) return p;
+  }
+  for (let p = startPort; p < startPort + 1000; p++) {
+    if (!excludePorts.has(p)) return p;
   }
   return startPort;
 }
@@ -594,6 +625,7 @@ function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
     const tmpPath = `${destPath}.tmp_${Date.now()}`;
     let settled = false;
+    let activeStream = null;
 
     function cleanupTmp() {
       try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
@@ -601,12 +633,24 @@ function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
     function fail(err) {
       if (settled) return;
       settled = true;
-      cleanupTmp();
+      if (activeStream) {
+        const streamToClose = activeStream;
+        activeStream = null;
+        try {
+          streamToClose.once('close', cleanupTmp);
+          streamToClose.destroy();
+        } catch {
+          cleanupTmp();
+        }
+      } else {
+        cleanupTmp();
+      }
       reject(err);
     }
     function succeed() {
       if (settled) return;
       settled = true;
+      activeStream = null;
       try {
         if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
         fs.renameSync(tmpPath, destPath);
@@ -627,7 +671,13 @@ function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
         timeout: timeoutMs
       }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          const nextUrl = new URL(res.headers.location, currentUrl).href;
+          let nextUrl;
+          try {
+            nextUrl = new URL(res.headers.location, currentUrl).href;
+          } catch (e) {
+            res.resume();
+            return fail(new Error(`无效的重定向地址: ${e.message}`));
+          }
           if (currentUrl.startsWith('https:') && nextUrl.startsWith('http:')) {
             res.resume();
             return fail(new Error('禁止从 HTTPS 降级到 HTTP 重定向 (Insecure redirect)'));
@@ -640,6 +690,7 @@ function downloadBinary(url, destPath, timeoutMs = 30000, maxRedirects = 5) {
           return fail(new Error(`下载失败，HTTP 状态码: ${res.statusCode}`));
         }
         const fileStream = fs.createWriteStream(tmpPath);
+        activeStream = fileStream;
         res.pipe(fileStream);
         fileStream.on('finish', () => {
           fileStream.close(() => succeed());
@@ -691,10 +742,13 @@ function extractZip(zipPath, targetDir) {
     } catch {}
   }
 
-  // 策略 4: Windows PowerShell
+  // 策略 4: Windows PowerShell (通过环境变量传递路径，规避单引号与特殊字符注入)
   if (os.platform() === 'win32') {
     try {
-      execFileSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${targetDir}' -Force`], { stdio: 'ignore' });
+      execFileSync('powershell', ['-NoProfile', '-Command', 'Expand-Archive -LiteralPath $env:EX_ZIP -DestinationPath $env:EX_DIR -Force'], {
+        stdio: 'ignore',
+        env: { ...process.env, EX_ZIP: zipPath, EX_DIR: targetDir }
+      });
       return true;
     } catch {}
   }
@@ -921,13 +975,19 @@ function superviseProcess(tag, launcher) {
 function setupContainerUptime() {
   if (!isContainerEnvironment() || uptimeTimer) return;
   try {
-    const fakeUptime = '/tmp/.fake_uptime';
     const startSec = Math.floor(Date.now() / 1000);
-    fs.writeFileSync(fakeUptime, '0.00 0.00\n');
-    execSync(`mount --bind ${fakeUptime} /proc/uptime`, { stdio: 'ignore' });
+    // 使用 O_NOFOLLOW 防止预置符号链接覆写，并置于受控 CORE_DIR 内
+    const noFollowFlag = fs.constants.O_NOFOLLOW || 0;
+    const fd = fs.openSync(FAKE_UPTIME_FILE, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | noFollowFlag, 0o644);
+    try {
+      fs.writeSync(fd, '0.00 0.00\n');
+    } finally {
+      fs.closeSync(fd);
+    }
+    execFileSync('mount', ['--bind', FAKE_UPTIME_FILE, '/proc/uptime'], { stdio: 'ignore' });
     uptimeTimer = setInterval(() => {
       const up = (Math.floor(Date.now() / 1000) - startSec).toFixed(2);
-      try { fs.writeFileSync(fakeUptime, `${up} ${up}\n`); } catch {}
+      try { fs.writeFileSync(FAKE_UPTIME_FILE, `${up} ${up}\n`); } catch {}
     }, 2000);
   } catch {}
 }
@@ -1003,11 +1063,25 @@ async function main() {
 
   const UUID = getOrGenerateUUID();
   const TROJAN_PASS = UUID;
-  const SUB_PATH = (PRESET_SUB || process.env.SUB || 'sub').trim().replace(/^\/+/, '');
+  const SUB_PATH = (PRESET_SUB || process.env.SUB || 'sub').trim().replace(/^\/+|\/+$/g, '') || 'sub';
   const SUB_TOKEN = getOrGenerateSubToken(PRESET_SUB_TOKEN);
-  const INBOUND_PORT = parseInt(PRESET_PORT || process.env.PORT || '0', 10) || await findAvailablePort(3000);
-  const ARGO_PORT = parseInt(PRESET_ARGO_PORT || process.env.ARGO_PORT || '8001', 10);
+
+  const rawInbound = PRESET_PORT || process.env.PORT || '';
+  const parsedInbound = parseValidPort(rawInbound, 0);
+  if (parsedInbound === null) {
+    console.warn(`[配置] 无效的 PORT='${rawInbound}'，将自动寻找可用端口`);
+  }
+
+  const rawArgoPort = PRESET_ARGO_PORT || process.env.ARGO_PORT || '';
+  const parsedArgo = parseValidPort(rawArgoPort, 8001);
+  if (parsedArgo === null) {
+    console.warn(`[配置] 无效的 ARGO_PORT='${rawArgoPort}'，已回退默认端口 8001`);
+  }
+  const ARGO_PORT = (parsedArgo && parsedArgo > 0) ? parsedArgo : 8001;
+
   const DISABLE_ARGO = (PRESET_DISABLE_ARGO || process.env.DISABLE_ARGO || '').toLowerCase() === 'true';
+  const ENABLE_DIRECT_WS = (process.env.ENABLE_DIRECT_WS || '').toLowerCase() === 'true';
+  const NEED_WS_XHTTP = !DISABLE_ARGO || ENABLE_DIRECT_WS;
   const ARGO_DOMAIN = (PRESET_ARGO_DOMAIN || process.env.ARGO_DOMAIN || '').trim();
   const ARGO_AUTH = (PRESET_ARGO_AUTH || process.env.ARGO_AUTH || '').trim();
   const ARGO_PROTOCOL = (PRESET_ARGO_PROTOCOL || process.env.ARGO_PROTOCOL || '').trim();
@@ -1016,22 +1090,49 @@ async function main() {
   const XHTTP_DOWN_DOMAIN = (PRESET_XHTTP_DOWN_DOMAIN || process.env.XHTTP_DOWN_DOMAIN || '').trim();
   const XHTTP_DOWN_HOST = (PRESET_XHTTP_DOWN_HOST || process.env.XHTTP_DOWN_HOST || '').trim();
 
-  const REALITY_PORT = (PRESET_REALITY_PORT || process.env.REALITY_PORT || '').trim();
-  const SS_PORT = (PRESET_SS_PORT || process.env.SS_PORT || '').trim();
+  function resolveOptionalPort(name, rawVal) {
+    if (String(rawVal || '').trim() === '0') return '';
+    const p = parseValidPort(rawVal, 0);
+    if (p === null) {
+      console.error(`[配置致命错误] ${name} 端口无效: '${rawVal}' (必须为 1-65535 整数)`);
+      process.exit(1);
+    }
+    return p > 0 ? String(p) : '';
+  }
+
+  const REALITY_PORT = resolveOptionalPort('REALITY_PORT', PRESET_REALITY_PORT || process.env.REALITY_PORT || '');
+  const SS_PORT = resolveOptionalPort('SS_PORT', PRESET_SS_PORT || process.env.SS_PORT || '');
   const SS_PASS = getOrGenerateSSPass(PRESET_SS_PASS);
-  const S5_PORT = (PRESET_S5_PORT || process.env.S5_PORT || '').trim();
+  const S5_PORT = resolveOptionalPort('S5_PORT', PRESET_S5_PORT || process.env.S5_PORT || '');
   const s5Creds = getOrGenerateS5Creds(PRESET_S5_USER, PRESET_S5_PASS);
   const S5_USER = s5Creds.user;
   const S5_PASS = s5Creds.pass;
 
-  // 端口防冲突检查
+  const excludedAutoPorts = new Set([
+    ...(!DISABLE_ARGO ? [ARGO_PORT] : []),
+    ...(NEED_WS_XHTTP ? [V_VMESS_PORT, V_VLESS_PORT, V_TROJAN_PORT, V_XHTTP_PORT] : []),
+    ...(REALITY_PORT ? [parseInt(REALITY_PORT, 10)] : []),
+    ...(SS_PORT ? [parseInt(SS_PORT, 10)] : []),
+    ...(S5_PORT ? [parseInt(S5_PORT, 10)] : [])
+  ]);
+  const INBOUND_PORT = (parsedInbound && parsedInbound > 0)
+    ? parsedInbound
+    : await findAvailablePort(3000, excludedAutoPorts);
+
+  // 端口防冲突检查（启用 Argo 或直连分流时纳入内部回环保留端口 10000-10003）
   const configuredPorts = [
     { name: 'PORT', port: INBOUND_PORT },
-    { name: 'ARGO_PORT', port: ARGO_PORT },
-    { name: 'REALITY_PORT', port: parseInt(REALITY_PORT, 10) },
-    { name: 'SS_PORT', port: parseInt(SS_PORT, 10) },
-    { name: 'S5_PORT', port: parseInt(S5_PORT, 10) }
-  ].filter(p => !isNaN(p.port) && p.port > 0);
+    ...(!DISABLE_ARGO ? [{ name: 'ARGO_PORT', port: ARGO_PORT }] : []),
+    ...(NEED_WS_XHTTP ? [
+      { name: 'V_VMESS_PORT(内部)', port: V_VMESS_PORT },
+      { name: 'V_VLESS_PORT(内部)', port: V_VLESS_PORT },
+      { name: 'V_TROJAN_PORT(内部)', port: V_TROJAN_PORT },
+      { name: 'V_XHTTP_PORT(内部)', port: V_XHTTP_PORT }
+    ] : []),
+    ...(REALITY_PORT ? [{ name: 'REALITY_PORT', port: parseInt(REALITY_PORT, 10) }] : []),
+    ...(SS_PORT ? [{ name: 'SS_PORT', port: parseInt(SS_PORT, 10) }] : []),
+    ...(S5_PORT ? [{ name: 'S5_PORT', port: parseInt(S5_PORT, 10) }] : [])
+  ];
 
   const portMap = new Map();
   for (const { name, port } of configuredPorts) {
@@ -1077,10 +1178,16 @@ async function main() {
       }
     } catch {}
     if (!PUBLIC_IP) {
-      try {
-        const ipStr = await httpGet('https://api.ipify.org');
-        if (ipStr) PUBLIC_IP = validateIp(ipStr);
-      } catch {}
+      for (const probeUrl of ['https://ifconfig.co/ip', 'https://api.ipify.org']) {
+        try {
+          const ipStr = await httpGet(probeUrl);
+          const valid = validateIp(ipStr);
+          if (valid) {
+            PUBLIC_IP = valid;
+            break;
+          }
+        } catch {}
+      }
     }
     if (!NODE_NAME) {
       const validCountry = geoCountry && geoCountry !== 'DEFAULT' ? geoCountry : '';
@@ -1100,8 +1207,8 @@ async function main() {
   // 4. 构建 Xray 配置 JSON
   const inbounds = [];
 
-  // Argo 内部反代入站
-  if (!DISABLE_ARGO) {
+  // WS / xhttp 内部反代入站（Argo 隧道或主端口直连分流时启用）
+  if (NEED_WS_XHTTP) {
     inbounds.push(
       {
         tag: 'vmess-ws-in',
@@ -1254,11 +1361,11 @@ async function main() {
     return spawn(xrayBin, ['run', '-config', CONFIG_FILE], {
       argv0: os.platform() !== 'win32' ? 'node /app/worker.js' : undefined,
       stdio: 'ignore',
-      env: getSafeChildEnv({ XRAY_LOCATION_ASSET: CORE_DIR })
+      env: getSafeChildEnv({ XRAY_LOCATION_ASSET: ASSET_DIR })
     });
   });
 
-  if (!DISABLE_ARGO) {
+  if (NEED_WS_XHTTP) {
     const readyResults = await Promise.all([
       waitPortReady(V_VMESS_PORT).then(r => ({ port: V_VMESS_PORT, name: 'VMess', ok: r })),
       waitPortReady(V_VLESS_PORT).then(r => ({ port: V_VLESS_PORT, name: 'VLESS', ok: r })),
@@ -1284,10 +1391,10 @@ async function main() {
     }
     const pathname = urlObj.pathname;
 
-    // A. VLESS-xhttp (SplitHTTP) 流反向代理（仅在内部 argoServer 或禁用 Argo / 显式开启直连时分流）
+    // A. VLESS-xhttp (SplitHTTP) 流反向代理（Argo 内部端口直接放行，主端口仅在启用 ENABLE_DIRECT_WS 时放行）
     if (pathname === XHTTP_PATH_VLESS || pathname.startsWith(XHTTP_PATH_VLESS + '/')) {
       const isMainServer = req.socket && req.socket.localPort === parseInt(INBOUND_PORT, 10);
-      const allowXhttp = !isMainServer || DISABLE_ARGO || process.env.ENABLE_DIRECT_WS === 'true';
+      const allowXhttp = NEED_WS_XHTTP && (!isMainServer || ENABLE_DIRECT_WS);
       if (allowXhttp) {
         const proxyReq = http.request({
           host: '127.0.0.1',
@@ -1312,10 +1419,10 @@ async function main() {
             proxyReq.destroy();
           });
         }
-        proxyReq.on('error', (err) => {
+        proxyReq.on('error', () => {
           if (!res.headersSent) {
             res.writeHead(502, { 'Content-Type': 'text/plain' });
-            res.end(`Bad Gateway: ${err.message}`);
+            res.end('Bad Gateway');
           } else {
             res.destroy();
           }
@@ -1339,6 +1446,13 @@ async function main() {
         }
       }
       if (!global.SUB_CONTENT) {
+        if (DISABLE_ARGO) {
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Cache-Control': 'no-cache, no-store'
+          });
+          return res.end('');
+        }
         res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
         return res.end('Tunnel initializing, please retry in 5 seconds...');
       }
@@ -1413,15 +1527,18 @@ async function main() {
     });
   }
 
-  // 6. 启动外部直连主 HTTP 服务 (挂载 Web、订阅、xhttp；仅在无 Argo 或显式开启时挂载直连 WS)
+  // 6. 启动外部直连主 HTTP 服务 (挂载 Web、订阅；显式开启 ENABLE_DIRECT_WS 时挂载 WS Upgrade)
   const mainServer = http.createServer(handleHttp);
   mainServer.requestTimeout = 0;
   mainServer.on('error', (e) => console.error(`[HTTP] 主服务异常: ${e.message}`));
-  if (DISABLE_ARGO || process.env.ENABLE_DIRECT_WS === 'true') {
+  if (ENABLE_DIRECT_WS) {
     mainServer.on('upgrade', handleUpgrade);
   }
   mainServer.listen(INBOUND_PORT, '0.0.0.0', () => {
     console.log(`[HTTP] Web 伪装站点与订阅服务已就绪: http://0.0.0.0:${INBOUND_PORT}`);
+    if (ENABLE_DIRECT_WS) {
+      console.log(`[Direct-WS] 主端口直连分流已启用 (${XHTTP_PATH_VLESS}, ${WS_PATH_VLESS}, ${WS_PATH_VMESS}, ${WS_PATH_TROJAN})，请配合 PaaS/CDN/反代 443 TLS 域名使用`);
+    }
     if (DISABLE_ARGO) {
       console.warn('[安全提醒] DISABLE_ARGO 模式下主端口为明文 HTTP，若向公网暴露，建议配置反代或 TLS 证书');
     }
@@ -1495,15 +1612,17 @@ async function main() {
     }
 
     if (!DISABLE_ARGO && currentHost) {
+      const urlPreferHost = formatHostForUrl(preferHost);
+      const rawPreferHost = String(preferHost).trim().replace(/^\[/, '').replace(/\]$/, '');
       // A. VLESS-xhttp
-      list.push(`vless://${UUID}@${preferHost}:443?encryption=none&security=tls&type=xhttp&host=${currentHost}&path=${encodeURIComponent(XHTTP_PATH_VLESS)}&mode=packet-up&sni=${currentHost}${xhExtraParam}#${encodeURIComponent(name + '-VLESS-xhttp')}`);
+      list.push(`vless://${UUID}@${urlPreferHost}:443?encryption=none&security=tls&type=xhttp&host=${currentHost}&path=${encodeURIComponent(XHTTP_PATH_VLESS)}&mode=packet-up&sni=${currentHost}${xhExtraParam}#${encodeURIComponent(name + '-VLESS-xhttp')}`);
       // B. VLESS-WS
-      list.push(`vless://${UUID}@${preferHost}:443?encryption=none&security=tls&type=ws&host=${currentHost}&path=${encodeURIComponent(WS_PATH_VLESS)}&sni=${currentHost}#${encodeURIComponent(name + '-VLESS-WS')}`);
+      list.push(`vless://${UUID}@${urlPreferHost}:443?encryption=none&security=tls&type=ws&host=${currentHost}&path=${encodeURIComponent(WS_PATH_VLESS)}&sni=${currentHost}#${encodeURIComponent(name + '-VLESS-WS')}`);
       // C. VMess-WS
       const vmessConf = {
         v: '2',
         ps: `${name}-VMess-WS`,
-        add: preferHost,
+        add: rawPreferHost,
         port: '443',
         id: UUID,
         aid: '0',
@@ -1517,7 +1636,7 @@ async function main() {
       };
       list.push(`vmess://${Buffer.from(JSON.stringify(vmessConf)).toString('base64')}`);
       // D. Trojan-WS
-      list.push(`trojan://${TROJAN_PASS}@${preferHost}:443?security=tls&type=ws&host=${currentHost}&path=${encodeURIComponent(WS_PATH_TROJAN)}&sni=${currentHost}#${encodeURIComponent(name + '-Trojan-WS')}`);
+      list.push(`trojan://${TROJAN_PASS}@${urlPreferHost}:443?security=tls&type=ws&host=${currentHost}&path=${encodeURIComponent(WS_PATH_TROJAN)}&sni=${currentHost}#${encodeURIComponent(name + '-Trojan-WS')}`);
     }
 
     // E. 直连 Reality
@@ -1550,8 +1669,28 @@ async function main() {
   }
 
   // 8. 优选域名选择与初始订阅构建 (直连节点优先就绪，隧道就绪后再刷新 Argo 节点)
-  const preferHost = PRESET_CF_PREFER_HOST || process.env.CF_PREFER_HOST || CF_PREFER_HOST_CANDIDATES[0];
+  const preferHost = (PRESET_CF_PREFER_HOST || process.env.CF_PREFER_HOST || CF_PREFER_HOST_CANDIDATES[0]).trim() || CF_PREFER_HOST_CANDIDATES[0];
   buildSubscription(preferHost, currentArgoHost);
+
+  function attachLineReader(stream, onLine) {
+    let buf = '';
+    stream.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      if (buf.length > 65536) buf = buf.slice(-32768);
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line) onLine(line);
+      }
+    });
+    stream.on('end', () => {
+      if (buf) {
+        onLine(buf);
+        buf = '';
+      }
+    });
+  }
 
   // 9. 启动 Cloudflare Tunnel
   if (!DISABLE_ARGO) {
@@ -1570,8 +1709,7 @@ async function main() {
             env: getSafeChildEnv({ TUNNEL_TOKEN: ARGO_AUTH }),
             stdio: ['ignore', 'ignore', 'pipe']
           });
-          p.stderr.on('data', (d) => {
-            const line = d.toString();
+          attachLineReader(p.stderr, (line) => {
             if (/Registered tunnel connection/i.test(line)) {
               if (!fixedNotified) {
                 fixedNotified = true;
@@ -1595,8 +1733,7 @@ async function main() {
             env: getSafeChildEnv(),
             stdio: ['ignore', 'ignore', 'pipe']
           });
-          p.stderr.on('data', (d) => {
-            const line = d.toString();
+          attachLineReader(p.stderr, (line) => {
             const match = line.match(/https:\/\/(?!api\.)([a-zA-Z0-9-]+\.trycloudflare\.com)/i);
             if (match && match[1]) {
               const newHost = match[1];
@@ -1655,9 +1792,10 @@ async function main() {
     if (!showLog) return;
 
     const subTokenQuery = SUB_TOKEN ? `?token=${encodeURIComponent(SUB_TOKEN)}` : '';
+    const subHost = formatHostForUrl(PUBLIC_IP || '127.0.0.1');
     const primarySubUrl = (!DISABLE_ARGO && host)
       ? `https://${host}/${SUB_PATH}${subTokenQuery}`
-      : `http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`;
+      : `http://${subHost}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`;
 
     console.log('\n============================================================');
     console.log(`🚀 Xray 多功能综合穿透代理服务已就绪`);
@@ -1665,6 +1803,9 @@ async function main() {
     console.log(`🔗 外部订阅: ${primarySubUrl}`);
     if (!DISABLE_ARGO && host) console.log(`🛡️ Argo 域名: ${host}`);
     console.log('---------------- 节点订阅明细 ----------------');
+    if (list.length === 0 && ENABLE_DIRECT_WS) {
+      console.log(`(已开启主端口直连分流: xhttp=${XHTTP_PATH_VLESS}, vless-ws=${WS_PATH_VLESS}, vmess-ws=${WS_PATH_VMESS}, trojan-ws=${WS_PATH_TROJAN}；请搭配前置 TLS/CDN 域名 + 端口 443 使用)`);
+    }
     for (const link of list) {
       console.log(link);
     }
@@ -1689,9 +1830,10 @@ async function main() {
     if (!token || !chatId) return;
 
     const subTokenQuery = SUB_TOKEN ? `?token=${encodeURIComponent(SUB_TOKEN)}` : '';
+    const subHost = formatHostForUrl(PUBLIC_IP || '127.0.0.1');
     const primarySubUrl = (!DISABLE_ARGO && host)
       ? `https://${host}/${SUB_PATH}${subTokenQuery}`
-      : `http://${PUBLIC_IP || '127.0.0.1'}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`;
+      : `http://${subHost}:${INBOUND_PORT}/${SUB_PATH}${subTokenQuery}`;
 
     let text = `🎉 *Xray 节点部署成功通知*\n` +
       `*节点*: \`${(NODE_NAME || 'xray').replace(/`/g, '')}\`\n`;

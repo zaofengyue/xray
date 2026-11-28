@@ -167,6 +167,14 @@
             <input type="text" id="field-sub" placeholder="默认 sub（即 /sub）">
             <span class="desc">SUB</span>
           </div>
+          <div class="field">
+            <label for="field-sub-token">订阅访问 Token</label>
+            <div class="field-input-row">
+              <input type="text" id="field-sub-token" placeholder="留空自动生成随机 Token">
+              <button type="button" class="btn-mini" id="gen-sub-token">随机</button>
+            </div>
+            <span class="desc">SUB_TOKEN</span>
+          </div>
           <div class="field" style="grid-column: 1 / -1;">
             <label for="field-public-ip">自定义公网 IP / 域名</label>
             <input type="text" id="field-public-ip" placeholder="留空自动多源并发探测（NAT 机请填写公网映射 IP）">
@@ -249,9 +257,9 @@
                 </div>
               </div>
               <div class="field">
-                <label>Reality xhttp 端口 (SplitHTTP)</label>
+                <label>Reality xhttp 端口 (SplitHTTP · 一键脚本)</label>
                 <div class="field-input-row">
-                  <input type="number" id="input-xhttp" placeholder="留空不启用 (推荐高位)">
+                  <input type="number" id="input-xhttp" placeholder="留空不启用 (Docker 模式忽略)">
                   <button type="button" class="btn-mini btn-proto-rand" data-key="xhttp">生成</button>
                 </div>
               </div>
@@ -269,14 +277,14 @@
           <!-- Trojan-TCP -->
           <div class="proto-card" id="card-trojan" style="grid-column: 1 / -1;">
             <div class="proto-card-header">
-              <span class="proto-name">Trojan-TCP <span class="proto-badge">TLS 直连 · xhttp 回落</span></span>
+              <span class="proto-name">Trojan-TCP <span class="proto-badge">TLS 直连 · 仅一键脚本</span></span>
               <span class="proto-var">TROJAN_PORT / TROJAN_PASS</span>
             </div>
             <div class="field-row" style="margin-top:4px;">
               <div class="field">
                 <label>监听端口</label>
                 <div class="field-input-row">
-                  <input type="number" id="input-trojan" placeholder="留空不启用 (推荐 8443 或自定义)">
+                  <input type="number" id="input-trojan" placeholder="留空不启用 (Docker 模式忽略)">
                   <button type="button" class="btn-mini btn-proto-rand" data-key="trojan">生成</button>
                 </div>
               </div>
@@ -387,7 +395,7 @@
   ];
 
   const state = {
-    uuid: '', port: '', name: '', sub: '', publicIp: '',
+    uuid: '', port: '', name: '', sub: '', subToken: '', publicIp: '',
     argoPort: '', argoDomain: '', argoAuth: '', disableArgo: false, cfPrefer: '',
     reality: '', xhttp: '', realityDomain: '',
     trojan: '', trojanPass: '', ss: '', s5: '',
@@ -395,18 +403,28 @@
     cmdType: 'curl'
   };
 
-  function randPort(){ return String(10000 + Math.floor(Math.random() * 55535)); }
+  const RESERVED_PORTS = new Set(['10000', '10001', '10002', '10003', '10808']);
+
+  function randPort(){
+    const used = new Set([state.port, state.argoPort, state.reality, state.xhttp, state.trojan, state.ss, state.s5]);
+    for(let i = 0; i < 100; i++){
+      const p = String(10000 + Math.floor(Math.random() * 55535));
+      if(!RESERVED_PORTS.has(p) && !used.has(p)) return p;
+    }
+    return String(20000 + Math.floor(Math.random() * 40000));
+  }
 
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
-  function buildPairs(){
+  function buildPairs(isDocker){
     const p = [];
     if(state.uuid)          p.push(['UUID',           state.uuid,         false]);
     if(state.port)          p.push(['PORT',           state.port,         false]);
     if(state.name)          p.push(['NAME',           state.name,         false]);
     if(state.sub)           p.push(['SUB',            state.sub,          false]);
+    if(state.subToken)      p.push(['SUB_TOKEN',      state.subToken,     false]);
     if(state.publicIp)      p.push(['PUBLIC_IP',      state.publicIp,     false]);
     if(state.argoPort)      p.push(['ARGO_PORT',      state.argoPort,     false]);
     if(state.argoDomain)    p.push(['ARGO_DOMAIN',    state.argoDomain,   false]);
@@ -414,10 +432,10 @@
     if(state.disableArgo)   p.push(['DISABLE_ARGO',   'true',             false]);
     if(state.cfPrefer)      p.push(['CF_PREFER_HOST', state.cfPrefer,     false]);
     if(state.reality)       p.push(['REALITY_PORT',   state.reality,      false]);
-    if(state.xhttp)         p.push(['XHTTP_PORT',     state.xhttp,        false]);
+    if(!isDocker && state.xhttp)       p.push(['XHTTP_PORT',     state.xhttp,        false]);
     if(state.realityDomain) p.push(['REALITY_DOMAIN', state.realityDomain,false]);
-    if(state.trojan)        p.push(['TROJAN_PORT',    state.trojan,       false]);
-    if(state.trojanPass)    p.push(['TROJAN_PASS',    state.trojanPass,   false]);
+    if(!isDocker && state.trojan)      p.push(['TROJAN_PORT',    state.trojan,       false]);
+    if(!isDocker && state.trojanPass)  p.push(['TROJAN_PASS',    state.trojanPass,   false]);
     if(state.ss)            p.push(['SS_PORT',        state.ss,           false]);
     if(state.s5)            p.push(['S5_PORT',        state.s5,           false]);
     if(state.komariDomain)  p.push(['KOMARI_DOMAIN',  state.komariDomain, false]);
@@ -425,27 +443,32 @@
     return p;
   }
 
+  // 安全单引号转义，防止用户输入的 $、`、"、\ 在贴入终端时触发 Shell 命令替换
   function formatVal(v, forceQuote){
-    if(forceQuote || /[\s"'\\`$|&;()<>]/.test(v)) return `"${v}"`;
-    return v;
+    const s = String(v);
+    if(!forceQuote && /^[A-Za-z0-9_.:/@-]+$/.test(s)) return s;
+    return `'${s.replace(/'/g, "'\\''")}'`;
   }
 
   function formatValHtml(v, forceQuote){
-    if(forceQuote || /[\s"'\\`$|&;()<>]/.test(v)) return `"${escapeHtml(v)}"`;
-    return escapeHtml(v);
+    return escapeHtml(formatVal(v, forceQuote));
+  }
+
+  function formatEnvVal(v){
+    const s = String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
+    return `"${s}"`;
   }
 
   function plainCommand(){
-    const pairs = buildPairs();
-    if(state.cmdType === 'docker'){
+    const isDocker = state.cmdType === 'docker';
+    const pairs = buildPairs(isDocker);
+    if(isDocker){
       let doc = `docker run -d --name xray --restart always`;
       const portVal = state.port || '3000';
       doc += ` -p ${portVal}:${portVal}`;
       if(state.reality) doc += ` -p ${state.reality}:${state.reality}`;
-      if(state.xhttp)   doc += ` -p ${state.xhttp}:${state.xhttp}`;
-      if(state.trojan)  doc += ` -p ${state.trojan}:${state.trojan}`;
-      if(state.ss)      doc += ` -p ${state.ss}:${state.ss}`;
-      if(state.s5)      doc += ` -p ${state.s5}:${state.s5}`;
+      if(state.ss)      doc += ` -p ${state.ss}:${state.ss} -p ${state.ss}:${state.ss}/udp`;
+      if(state.s5)      doc += ` -p ${state.s5}:${state.s5} -p ${state.s5}:${state.s5}/udp`;
       for(const [k, v] of pairs){
         doc += ` -e ${k}=${formatVal(v, true)}`;
       }
@@ -453,7 +476,7 @@
       return doc;
     }
     if(state.cmdType === 'env'){
-      return pairs.map(([k, v]) => `${k}="${v}"`).join('\n');
+      return pairs.map(([k, v]) => `${k}=${formatEnvVal(v)}`).join('\n');
     }
     const envStr = pairs.map(([k, v, q]) => `${k}=${formatVal(v, q)}`).join(' ');
     const fetcher = state.cmdType === 'curl'
@@ -463,21 +486,23 @@
   }
 
   function render(){
-    const pairs = buildPairs();
+    const isDocker = state.cmdType === 'docker';
+    const pairs = buildPairs(isDocker);
     const tabName = document.getElementById('terminal-tab-name');
     const tip = document.getElementById('terminal-tip');
 
-    if(state.cmdType === 'docker'){
+    if(isDocker){
       tabName.textContent = 'docker run';
-      tip.textContent = '已映射所需外部直连端口与环境参数，直接执行即可启动容器。';
+      const hasScriptOnly = !!(state.xhttp || state.trojan || state.trojanPass);
+      tip.textContent = hasScriptOnly
+        ? '已映射外部端口 (含 SS/S5 TCP+UDP)。注：XHTTP_PORT / TROJAN_PORT 仅限一键脚本，Docker 镜像已自动忽略。'
+        : '已映射所需外部直连端口 (含 SS/S5 TCP+UDP) 与环境参数，直接执行即可启动容器。';
       let docHtml = `docker run -d --name xray --restart always`;
       const portVal = state.port || '3000';
       docHtml += ` -p ${escapeHtml(portVal)}:${escapeHtml(portVal)}`;
       if(state.reality) docHtml += ` -p ${escapeHtml(state.reality)}:${escapeHtml(state.reality)}`;
-      if(state.xhttp)   docHtml += ` -p ${escapeHtml(state.xhttp)}:${escapeHtml(state.xhttp)}`;
-      if(state.trojan)  docHtml += ` -p ${escapeHtml(state.trojan)}:${escapeHtml(state.trojan)}`;
-      if(state.ss)      docHtml += ` -p ${escapeHtml(state.ss)}:${escapeHtml(state.ss)}`;
-      if(state.s5)      docHtml += ` -p ${escapeHtml(state.s5)}:${escapeHtml(state.s5)}`;
+      if(state.ss)      docHtml += ` -p ${escapeHtml(state.ss)}:${escapeHtml(state.ss)} -p ${escapeHtml(state.ss)}:${escapeHtml(state.ss)}/udp`;
+      if(state.s5)      docHtml += ` -p ${escapeHtml(state.s5)}:${escapeHtml(state.s5)} -p ${escapeHtml(state.s5)}:${escapeHtml(state.s5)}/udp`;
       for(const [k, v] of pairs){
         docHtml += ` -e <span class="var">${escapeHtml(k)}</span>=${formatValHtml(v, true)}`;
       }
@@ -489,7 +514,7 @@
     if(state.cmdType === 'env'){
       tabName.textContent = 'config.env';
       tip.textContent = '可直接保存至 VPS 目录 ~/xray/config.env 或用于 Docker Compose。';
-      const envHtml = pairs.map(([k, v]) => `<span class="var">${escapeHtml(k)}</span>="${escapeHtml(v)}"`).join('\n');
+      const envHtml = pairs.map(([k, v]) => `<span class="var">${escapeHtml(k)}</span>=${escapeHtml(formatEnvVal(v))}`).join('\n');
       document.getElementById('command-output').innerHTML = envHtml || '# 无自定义配置（全部采用内置默认值）';
       return;
     }
@@ -595,11 +620,21 @@
     render();
   });
 
+  document.getElementById('gen-sub-token').addEventListener('click', () => {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    const tok = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+    document.getElementById('field-sub-token').value = tok;
+    state.subToken = tok;
+    render();
+  });
+
   [
     ['field-uuid', 'uuid'],
     ['field-port', 'port'],
     ['field-name', 'name'],
     ['field-sub', 'sub'],
+    ['field-sub-token', 'subToken'],
     ['field-public-ip', 'publicIp'],
     ['field-argo-port', 'argoPort'],
     ['field-argo-domain', 'argoDomain'],
@@ -660,7 +695,7 @@
       state[k] = k === 'cmdType' ? 'curl' : (k === 'disableArgo' ? false : '');
     });
     [
-      'field-uuid', 'field-port', 'field-name', 'field-sub', 'field-public-ip',
+      'field-uuid', 'field-port', 'field-name', 'field-sub', 'field-sub-token', 'field-public-ip',
       'field-argo-port', 'field-argo-domain', 'field-argo-auth', 'field-cf-prefer',
       'field-reality-domain', 'field-trojan-pass', 'field-komari-domain', 'field-komari-token'
     ].forEach(id => {
